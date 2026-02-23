@@ -9,6 +9,8 @@ from mb.claude_adapter import (
     Turn,
     _extract_assistant_text,
     _extract_user_text,
+    _parse_ts,
+    chunks_from_turns,
     encode_project_dir,
     extract_turns,
     is_claude_session,
@@ -377,3 +379,64 @@ def test_chunk_claude_session_generates_chunks(tmp_path: Path) -> None:
     assert chunks_path.exists()
     written = [json.loads(line) for line in chunks_path.read_text().strip().splitlines()]
     assert len(written) == len(chunks)
+
+
+# --- _parse_ts ---
+
+
+def test_parse_ts_iso_z() -> None:
+    """ISO 8601 with Z suffix returns a positive epoch float."""
+    result = _parse_ts("2026-02-23T10:00:00Z")
+    assert result > 0
+    assert isinstance(result, float)
+
+
+def test_parse_ts_none() -> None:
+    assert _parse_ts(None) == 0.0
+
+
+def test_parse_ts_empty_string() -> None:
+    assert _parse_ts("") == 0.0
+
+
+def test_parse_ts_invalid() -> None:
+    assert _parse_ts("not-a-date") == 0.0
+
+
+# --- chunks_from_turns timestamps ---
+
+
+def test_chunks_from_turns_has_nonzero_timestamps() -> None:
+    """Chunks from turns with timestamps get non-zero ts_start/ts_end."""
+    turns = [
+        Turn(turn_number=1, user_message="hello", assistant_texts=["hi"],
+             timestamp="2026-02-23T10:00:00Z"),
+    ]
+    chunks = chunks_from_turns(turns, session_id="test-sess")
+    assert len(chunks) >= 1
+    assert chunks[0]["ts_start"] > 0
+    assert chunks[0]["ts_end"] > 0
+
+
+def test_chunks_from_turns_none_timestamp_fallback() -> None:
+    """Turns without timestamp produce ts=0.0."""
+    turns = [
+        Turn(turn_number=1, user_message="hello", assistant_texts=["hi"],
+             timestamp=None),
+    ]
+    chunks = chunks_from_turns(turns, session_id="test-sess")
+    assert chunks[0]["ts_start"] == 0.0
+    assert chunks[0]["ts_end"] == 0.0
+
+
+def test_chunks_from_turns_monotonic_timestamps() -> None:
+    """Timestamps across turns do not decrease."""
+    turns = [
+        Turn(turn_number=1, user_message="q1", assistant_texts=["a1"],
+             timestamp="2026-02-23T10:00:00Z"),
+        Turn(turn_number=2, user_message="q2", assistant_texts=["a2"],
+             timestamp="2026-02-23T11:00:00Z"),
+    ]
+    chunks = chunks_from_turns(turns, session_id="test-sess")
+    ts_values = [c["ts_end"] for c in chunks]
+    assert ts_values == sorted(ts_values)

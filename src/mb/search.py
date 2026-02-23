@@ -41,6 +41,10 @@ class VectorIndex:
     def search(self, query_vector: list[float], top_k: int = 5) -> list[dict]:
         """Search for top-K similar vectors by cosine similarity.
 
+        Uses memory-mapped I/O for the vectors file so that only the pages
+        touched by the matrix multiplication are read from disk.  Metadata
+        is loaded only for the top-K indices.
+
         Args:
             query_vector: Query embedding (will be normalized).
             top_k: Number of results to return.
@@ -51,22 +55,21 @@ class VectorIndex:
         if not self.vectors_path.exists() or self.vectors_path.stat().st_size == 0:
             return []
 
-        # Load vectors
-        raw = self.vectors_path.read_bytes()
-        n_vectors = len(raw) // VECTOR_BYTES
+        file_size = self.vectors_path.stat().st_size
+        n_vectors = file_size // VECTOR_BYTES
 
         # Integrity check: verify metadata line count matches
-        metadata_lines = self._load_metadata()
-        if len(metadata_lines) != n_vectors:
-            # Truncate to minimum of both
-            n_vectors = min(n_vectors, len(metadata_lines))
-            raw = raw[: n_vectors * VECTOR_BYTES]
-            metadata_lines = metadata_lines[:n_vectors]
+        n_metadata = self._count_metadata_lines()
+        if n_metadata != n_vectors:
+            n_vectors = min(n_vectors, n_metadata)
 
         if n_vectors == 0:
             return []
 
-        matrix = np.frombuffer(raw, dtype=np.float32).reshape(-1, VECTOR_DIM)
+        # Memory-mapped vectors — OS manages paging
+        matrix = np.memmap(
+            self.vectors_path, dtype=np.float32, mode="r", shape=(n_vectors, VECTOR_DIM)
+        )
 
         # Normalize query
         query = np.array(query_vector, dtype=np.float32)
@@ -87,13 +90,48 @@ class VectorIndex:
         # Sort by score descending
         top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
 
+        # Load metadata only for the needed indices
+        metadata_map = self._load_metadata_at_indices(set(top_indices))
+
         results = []
         for idx in top_indices:
-            meta = metadata_lines[idx]
+            meta = metadata_map.get(int(idx), {})
             meta["score"] = float(scores[idx])
             results.append(meta)
 
         return results
+
+    def _count_metadata_lines(self) -> int:
+        """Count non-empty lines in metadata.jsonl without parsing JSON."""
+        if not self.metadata_path.exists():
+            return 0
+        count = 0
+        with self.metadata_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+        return count
+
+    def _load_metadata_at_indices(self, indices: set[int]) -> dict[int, dict]:
+        """Load metadata only for the requested line indices (0-based).
+
+        Iterates the file once and exits early when all requested indices
+        have been collected.
+        """
+        if not self.metadata_path.exists() or not indices:
+            return {}
+        result: dict[int, dict] = {}
+        idx = 0
+        with self.metadata_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                if idx in indices:
+                    result[idx] = json.loads(line)
+                    if len(result) == len(indices):
+                        break
+                idx += 1
+        return result
 
     def _load_metadata(self) -> list[dict]:
         """Load all metadata lines."""
