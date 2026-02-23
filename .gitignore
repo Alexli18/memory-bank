@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+
+# Memory Bank data
+.memory-bank/
+
+# Claude data
+.claude/
+CLAUDE.md
+
+# Project internal docs
+prd.md
+specs/
+
+# specify
+.specify/
