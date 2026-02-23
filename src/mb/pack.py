@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import sys
 import time
@@ -10,7 +11,7 @@ from xml.sax.saxutils import escape
 
 from mb.chunker import _quality_score, chunk_all_sessions
 from mb.ollama_client import OllamaClient
-from mb.state import generate_state, load_state
+from mb.state import _state_is_stale, generate_state, load_state
 from mb.storage import read_config
 
 
@@ -44,13 +45,13 @@ def build_pack(budget: int, storage_root: Path) -> str:
         chat_model=ollama_cfg.get("chat_model", "gemma3:4b"),
     )
 
-    # Generate or load state
-    state = load_state(storage_root)
-    if state is None:
-        state = generate_state(storage_root, client)
-
-    # Ensure all sessions are chunked before building sections
+    # Ensure all sessions are chunked before loading state
     chunk_all_sessions(storage_root)
+
+    # Generate or load state (regenerate if stale)
+    state = load_state(storage_root)
+    if state is None or _state_is_stale(storage_root):
+        state = generate_state(storage_root, client)
 
     # Build sections
     sections = _build_sections(state, storage_root)
@@ -197,11 +198,14 @@ def _collect_recent_excerpts(
     *,
     min_quality: float = 0.30,
     min_length: int = 30,
+    max_excerpts: int = 200,
 ) -> list[dict]:
-    """Collect chunks from all sessions, sorted by ts_end descending (most recent first).
+    """Collect most recent chunks from all sessions, bounded by *max_excerpts*.
 
-    Chunks with quality_score below *min_quality* or stripped text shorter
-    than *min_length* characters are filtered out.
+    Uses a min-heap keyed by ``ts_end`` so that at most *max_excerpts*
+    chunks are kept in memory at any time.  Chunks with quality_score
+    below *min_quality* or stripped text shorter than *min_length*
+    characters are filtered out.
     For backward compatibility with old chunks.jsonl files that lack the
     quality_score field, the score is computed on the fly.
     """
@@ -209,7 +213,11 @@ def _collect_recent_excerpts(
     if not sessions_dir.exists():
         return []
 
-    all_chunks: list[dict] = []
+    # Min-heap of (ts_end, counter, chunk) — counter breaks ties to avoid
+    # comparing dicts.
+    heap: list[tuple[float, int, dict]] = []
+    counter = 0
+
     for session_dir in sessions_dir.iterdir():
         if not session_dir.is_dir():
             continue
@@ -228,12 +236,20 @@ def _collect_recent_excerpts(
                 quality = chunk.get(
                     "quality_score", _quality_score(text)
                 )
-                if quality >= min_quality:
-                    all_chunks.append(chunk)
+                if quality < min_quality:
+                    continue
 
-    # Sort by ts_end descending (most recent first) — stable sort for determinism
-    all_chunks.sort(key=lambda c: c.get("ts_end", 0), reverse=True)
-    return all_chunks
+                ts_end = chunk.get("ts_end", 0)
+                if len(heap) < max_excerpts:
+                    heapq.heappush(heap, (ts_end, counter, chunk))
+                elif ts_end > heap[0][0]:
+                    heapq.heapreplace(heap, (ts_end, counter, chunk))
+                counter += 1
+
+    # Extract chunks and sort by ts_end descending (most recent first)
+    result = [entry[2] for entry in heap]
+    result.sort(key=lambda c: c.get("ts_end", 0), reverse=True)
+    return result
 
 
 def _apply_budget(sections: dict[str, str], budget: int) -> str:

@@ -109,3 +109,56 @@ def test_collect_recent_excerpts_backward_compat(tmp_path: Path) -> None:
     # Only the chunk with real text should pass
     assert len(result) == 1
     assert result[0]["chunk_id"] == "s1-0"
+
+
+def _make_chunk(i: int, ts_end: float) -> dict:
+    """Helper: create a valid chunk dict."""
+    return {
+        "chunk_id": f"s1-{i}",
+        "session_id": "s1",
+        "text": f"chunk number {i} with enough text to pass filter",
+        "ts_end": ts_end,
+        "quality_score": 0.8,
+    }
+
+
+def test_collect_recent_excerpts_max_excerpts(tmp_path: Path) -> None:
+    """With 500 chunks and limit=10, only 10 are returned."""
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    with (session_dir / "chunks.jsonl").open("w") as f:
+        for i in range(500):
+            f.write(json.dumps(_make_chunk(i, float(i))) + "\n")
+
+    result = _collect_recent_excerpts(tmp_path, max_excerpts=10)
+
+    assert len(result) == 10
+
+
+def test_collect_recent_excerpts_keeps_most_recent(tmp_path: Path) -> None:
+    """Bounded collection keeps the most recent chunks."""
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    with (session_dir / "chunks.jsonl").open("w") as f:
+        for i in range(100):
+            f.write(json.dumps(_make_chunk(i, float(i))) + "\n")
+
+    result = _collect_recent_excerpts(tmp_path, max_excerpts=5)
+
+    assert len(result) == 5
+    ts_ends = [c["ts_end"] for c in result]
+    # Should be the 5 most recent (95..99), sorted descending
+    assert ts_ends == [99.0, 98.0, 97.0, 96.0, 95.0]
+
+
+def test_collect_recent_excerpts_fewer_than_max(tmp_path: Path) -> None:
+    """When fewer chunks than limit exist, all are returned."""
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    with (session_dir / "chunks.jsonl").open("w") as f:
+        for i in range(3):
+            f.write(json.dumps(_make_chunk(i, float(i))) + "\n")
+
+    result = _collect_recent_excerpts(tmp_path, max_excerpts=100)
+
+    assert len(result) == 3

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
@@ -215,6 +216,21 @@ def _extract_assistant_text(content: str | list | None) -> str | None:
     return None
 
 
+def _parse_ts(iso_str: str | None) -> float:
+    """Parse ISO 8601 timestamp string to epoch float.
+
+    Returns 0.0 for None, empty string, or unparseable values.
+    """
+    if not iso_str:
+        return 0.0
+    try:
+        # Python 3.10 fromisoformat doesn't handle 'Z' suffix
+        normalized = iso_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def chunks_from_turns(
     turns: list[Turn],
     session_id: str,
@@ -237,6 +253,7 @@ def chunks_from_turns(
         if not text.strip():
             continue
 
+        turn_ts = _parse_ts(turn.timestamp)
         segments = _split_turn_text(text, max_chars)
         overlap_text = ""
 
@@ -249,8 +266,8 @@ def chunks_from_turns(
                 "session_id": session_id,
                 "index": chunk_index,
                 "text": chunk_text,
-                "ts_start": 0.0,
-                "ts_end": 0.0,
+                "ts_start": turn_ts,
+                "ts_end": turn_ts,
                 "token_estimate": token_estimate,
                 "quality_score": _quality_score(chunk_text),
                 "source": "claude_native",

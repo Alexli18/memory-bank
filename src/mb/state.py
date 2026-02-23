@@ -2,12 +2,69 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import time
 from pathlib import Path
 
 from mb.chunker import chunk_all_sessions
 from mb.ollama_client import OllamaClient
+
+
+def _sample_chunks_for_state(
+    chunks: list[tuple[float, float, str]],
+    max_chars: int = 8000,
+) -> str:
+    """Select a representative sample of chunks within a character budget.
+
+    Each element in *chunks* is ``(quality_score, ts_end, text)``.
+
+    Strategy:
+    1. If everything fits — return all chunks in chronological order.
+    2. Otherwise pin the first (oldest) and last (newest) chunk as temporal
+       anchors, then fill the remaining budget with the highest-quality
+       chunks.  The final output is sorted by ``ts_end`` for chronological
+       coherence.
+    """
+    if not chunks:
+        return ""
+
+    total = sum(len(t) for _, _, t in chunks)
+    separator_overhead = (len(chunks) - 1) * 2  # "\n\n" between chunks
+
+    if total + separator_overhead <= max_chars:
+        # Everything fits — chronological order
+        ordered = sorted(chunks, key=lambda c: c[1])
+        return "\n\n".join(t for _, _, t in ordered)
+
+    # Pin first (min ts_end) and last (max ts_end)
+    first = min(chunks, key=lambda c: c[1])
+    last = max(chunks, key=lambda c: c[1])
+
+    selected: list[tuple[float, float, str]] = [first]
+    if last is not first:
+        selected.append(last)
+
+    budget = max_chars - sum(len(t) for _, _, t in selected)
+    budget -= (len(selected) - 1) * 2  # separators for pinned
+
+    # Remaining candidates sorted by quality descending
+    pinned_ids = {id(first), id(last)}
+    candidates = [c for c in chunks if id(c) not in pinned_ids]
+    # Use a max-heap (negate quality) for top-quality selection
+    quality_heap = [(-q, ts, t) for q, ts, t in candidates]
+    heapq.heapify(quality_heap)
+
+    while quality_heap and budget > 0:
+        neg_q, ts, t = heapq.heappop(quality_heap)
+        cost = len(t) + 2  # text + separator
+        if cost <= budget + 2:  # +2: last chunk doesn't need trailing sep
+            selected.append((-neg_q, ts, t))
+            budget -= cost
+
+    # Sort by ts_end for chronological output
+    selected.sort(key=lambda c: c[1])
+    return "\n\n".join(t for _, _, t in selected)
 
 
 _SYSTEM_PROMPT = """\
@@ -37,7 +94,7 @@ def generate_state(
     chunk_all_sessions(storage_root, force=True)
 
     sessions_dir = storage_root / "sessions"
-    all_text_parts: list[str] = []
+    all_chunks: list[tuple[float, float, str]] = []
     source_sessions: list[str] = []
 
     if sessions_dir.exists():
@@ -57,15 +114,11 @@ def generate_state(
                     chunk = json.loads(line)
                     text = chunk.get("text", "").strip()
                     quality = chunk.get("quality_score", 0)
+                    ts_end = chunk.get("ts_end", 0)
                     if text and quality >= 0.3:
-                        all_text_parts.append(text)
+                        all_chunks.append((quality, ts_end, text))
 
-    combined_text = "\n\n".join(all_text_parts)
-
-    # Truncate to avoid token limits (~8K chars for gemma3:4b context)
-    max_input_chars = 8000
-    if len(combined_text) > max_input_chars:
-        combined_text = combined_text[:max_input_chars] + "\n[...truncated...]"
+    combined_text = _sample_chunks_for_state(all_chunks)
 
     result = ollama_client.chat(
         user_prompt=combined_text or "(No session data available)",
@@ -104,3 +157,21 @@ def load_state(storage_root: Path) -> dict | None:
     if not state_path.exists():
         return None
     return json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def _state_is_stale(storage_root: Path) -> bool:
+    """Check if any session's chunks.jsonl is newer than state.json."""
+    state_path = storage_root / "state" / "state.json"
+    if not state_path.exists():
+        return False
+    sessions_dir = storage_root / "sessions"
+    if not sessions_dir.exists():
+        return False
+    state_mtime = state_path.stat().st_mtime
+    for session_dir in sessions_dir.iterdir():
+        if not session_dir.is_dir():
+            continue
+        chunks_path = session_dir / "chunks.jsonl"
+        if chunks_path.exists() and chunks_path.stat().st_mtime > state_mtime:
+            return True
+    return False

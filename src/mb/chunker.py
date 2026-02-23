@@ -109,13 +109,16 @@ def chunk_all_sessions(storage_root: Path, force: bool = False) -> None:
     for session_dir in sorted(sessions_dir.iterdir()):
         if not session_dir.is_dir():
             continue
-        events_path = session_dir / "events.jsonl"
         chunks_path = session_dir / "chunks.jsonl"
-        if not events_path.exists():
-            continue
         if chunks_path.exists() and not force:
             continue
-        chunk_session(events_path)
+        events_path = session_dir / "events.jsonl"
+        if events_path.exists():
+            chunk_session(events_path)
+        else:
+            # Hook-created sessions may lack events.jsonl;
+            # try Claude adapter directly via meta.json
+            _try_claude_adapter(session_dir)
 
 
 def _segment_events(events: list[dict]) -> list[dict]:
