@@ -1,5 +1,9 @@
 # Memory Bank
 
+[![CI](https://github.com/Alexli18/memory-bank/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexli18/memory-bank/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
 Capture, search, and restore LLM session context across sessions.
 
 Memory Bank automatically records your conversations with AI coding assistants (Claude Code, Codex, etc.), indexes them for semantic search, and generates context packs you can paste into fresh sessions to restore project knowledge.
