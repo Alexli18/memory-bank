@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from mb.sanitizer import strip_terminal_noise
 
@@ -14,10 +15,10 @@ def _quality_score(text: str) -> float:
         return 0.0
     stripped = text.strip()
     alnum_count = sum(1 for c in stripped if c.isalnum())
-    return alnum_count / len(stripped) if stripped else 0.0
+    return round(alnum_count / len(stripped), 3) if stripped else 0.0
 
 
-def chunk_session(events_path: Path) -> list[dict]:
+def chunk_session(events_path: Path) -> list[dict[str, Any]]:
     """Read events.jsonl and produce deterministic text chunks.
 
     For Claude Code sessions, delegates to the Claude adapter which reads
@@ -32,12 +33,12 @@ def chunk_session(events_path: Path) -> list[dict]:
     session_id = session_dir.name
 
     # Try Claude adapter for Claude Code sessions
-    chunks = _try_claude_adapter(session_dir)
-    if chunks:
-        return chunks
+    claude_chunks = _try_claude_adapter(session_dir)
+    if claude_chunks:
+        return claude_chunks
 
     # Read and filter stdout events, ordered by timestamp
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     with events_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -60,7 +61,7 @@ def chunk_session(events_path: Path) -> list[dict]:
     segments = _segment_events(events)
 
     # Build chunk dicts with overlap
-    chunks: list[dict] = []
+    chunks: list[dict[str, Any]] = []
     overlap_text = ""
 
     for idx, seg in enumerate(segments):
@@ -76,7 +77,7 @@ def chunk_session(events_path: Path) -> list[dict]:
             "ts_start": seg["ts_start"],
             "ts_end": seg["ts_end"],
             "token_estimate": len(text) // 4,
-            "quality_score": round(_quality_score(text), 3),
+            "quality_score": _quality_score(text),
         }
         chunks.append(chunk)
 
@@ -121,12 +122,12 @@ def chunk_all_sessions(storage_root: Path, force: bool = False) -> None:
             _try_claude_adapter(session_dir)
 
 
-def _segment_events(events: list[dict]) -> list[dict]:
+def _segment_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Segment events into chunks by double newline or token limit."""
     max_tokens = 512
     max_chars = max_tokens * 4  # chars/4 heuristic
 
-    segments: list[dict] = []
+    segments: list[dict[str, Any]] = []
     current_text = ""
     current_ts_start: float | None = None
     current_ts_end: float = 0.0
@@ -189,7 +190,7 @@ def _segment_events(events: list[dict]) -> list[dict]:
     return segments
 
 
-def _try_claude_adapter(session_dir: Path) -> list[dict] | None:
+def _try_claude_adapter(session_dir: Path) -> list[dict[str, Any]] | None:
     """Try to use Claude adapter for a session. Returns None if not applicable."""
     meta_path = session_dir / "meta.json"
     if not meta_path.exists():

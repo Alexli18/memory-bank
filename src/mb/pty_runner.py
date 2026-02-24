@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import errno
 import fcntl
+import logging
 import os
 import pty
 import select
@@ -17,6 +18,8 @@ from pathlib import Path
 
 from mb.sanitizer import AnsiStripper
 from mb.storage import create_session, finalize_session, write_event
+
+logger = logging.getLogger(__name__)
 
 
 def _get_winsize(fd: int) -> bytes:
@@ -45,13 +48,13 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
     session_id = create_session(child_cmd, root=storage_root)
     t0 = time.monotonic()
 
-    # Write system start event — silent on disk errors
+    # Write system start event
     try:
         write_event(
             session_id, "system", "system", "session_start", ts=0.0, root=storage_root
         )
     except OSError:
-        pass
+        logger.debug("Failed to write session_start event", exc_info=True)
 
     # Print session start banner to stderr
     sys.stderr.write(f"[mb] Session {session_id} started\n")
@@ -101,7 +104,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                 winsize = _get_winsize(stdin_fd)
                 _set_winsize(master_fd, winsize)
             except OSError:
-                pass
+                pass  # expected during terminal setup
 
         # Set up SIGWINCH handler to sync window size changes
         def _sigwinch_handler(signum: int, frame: object) -> None:
@@ -158,7 +161,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     # Forward to user FIRST (FR-014)
                     os.write(stdout_fd, data)
 
-                    # Then capture (sanitized) — silent on disk errors
+                    # Then capture (sanitized)
                     ts = time.monotonic() - t0
                     sanitized = output_stripper.process(data)
                     if sanitized:
@@ -172,7 +175,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                                 root=storage_root,
                             )
                         except OSError:
-                            pass
+                            logger.debug("Failed to write stdout event", exc_info=True)
 
                 if stdin_open and stdin_fd in rfds:
                     try:
@@ -196,7 +199,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     # Forward to child
                     os.write(master_fd, data)
 
-                    # Capture input (sanitized) — silent on disk errors
+                    # Capture input (sanitized)
                     ts = time.monotonic() - t0
                     sanitized = input_stripper.process(data)
                     if sanitized:
@@ -210,14 +213,14 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                                 root=storage_root,
                             )
                         except OSError:
-                            pass
+                            logger.debug("Failed to write stdin event", exc_info=True)
 
         finally:
             # Restore signal handlers
             signal.signal(signal.SIGWINCH, old_sigwinch)
             signal.signal(signal.SIGINT, old_sigint)
 
-        # Flush remaining sanitizer state — silent on disk errors
+        # Flush remaining sanitizer state
         remaining_out = output_stripper.flush()
         if remaining_out:
             ts = time.monotonic() - t0
@@ -231,7 +234,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     root=storage_root,
                 )
             except OSError:
-                pass
+                logger.debug("Failed to write flush stdout event", exc_info=True)
         remaining_in = input_stripper.flush()
         if remaining_in:
             ts = time.monotonic() - t0
@@ -245,7 +248,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     root=storage_root,
                 )
             except OSError:
-                pass
+                logger.debug("Failed to write flush stdin event", exc_info=True)
 
         # Wait for child process to finish
         try:
@@ -277,7 +280,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
         _restore_terminal()
         atexit.unregister(_restore_terminal)
 
-        # Write system end event and finalize — silent on disk errors
+        # Write system end event and finalize
         ts_end = time.monotonic() - t0
         try:
             write_event(
@@ -290,7 +293,7 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
             )
             finalize_session(session_id, exit_code, root=storage_root)
         except OSError:
-            pass
+            logger.debug("Failed to finalize session", exc_info=True)
 
         # Print session end banner to stderr
         sys.stderr.write(f"[mb] Session {session_id} ended (exit code: {exit_code})\n")

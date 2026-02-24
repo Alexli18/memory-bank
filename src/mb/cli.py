@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import click
 
 from mb import __version__
+
+logging.basicConfig(level=logging.WARNING)
 
 
 class MbError(click.ClickException):
@@ -138,9 +141,9 @@ def search(query: str, top: int) -> None:
     """Semantic search across captured sessions."""
     from mb import storage
     from mb.ollama_client import (
-        OllamaClient,
         OllamaNotRunningError,
         OllamaModelNotFoundError,
+        client_from_config,
     )
 
     root = _require_initialized()
@@ -155,11 +158,7 @@ def search(query: str, top: int) -> None:
 
     config = storage.read_config(root)
     ollama_cfg = config.get("ollama", {})
-    client = OllamaClient(
-        base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
-        embed_model=ollama_cfg.get("embed_model", "nomic-embed-text"),
-        chat_model=ollama_cfg.get("chat_model", "gemma3:4b"),
-    )
+    client = client_from_config(config)
 
     try:
         from mb.search import semantic_search
@@ -202,6 +201,31 @@ def search(query: str, top: int) -> None:
         click.echo()
 
     click.echo("No more results.")
+
+
+@cli.command("import")
+@click.option("--dry-run", is_flag=True, help="Show what would be imported.")
+def import_sessions(dry_run: bool) -> None:
+    """Import historical Claude Code sessions into Memory Bank."""
+    from mb import storage
+    from mb.importer import import_claude_sessions
+
+    # Auto-initialize if not initialized
+    storage_root = _storage_root()
+    if not (storage_root / "config.json").exists():
+        storage.init_storage(storage_root)
+        click.echo("Initialized Memory Bank in .memory-bank/")
+
+    imported, skipped = import_claude_sessions(storage_root, dry_run=dry_run)
+
+    if imported == 0 and skipped == 0:
+        click.echo("No Claude Code sessions found for this project.")
+        return
+
+    if dry_run:
+        click.echo(f"Dry run: {imported} session(s) would be imported, {skipped} skipped.")
+    else:
+        click.echo(f"Imported {imported} session(s), {skipped} skipped.")
 
 
 @cli.group()

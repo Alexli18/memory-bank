@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class MbStorageError(Exception):
+    """Error raised for corrupt or unreadable storage files."""
 
 
 MEMORY_BANK_DIR = ".memory-bank"
@@ -94,14 +102,18 @@ def ensure_initialized(root: Path | None = None) -> Path:
     return storage
 
 
-def read_config(root: Path | None = None) -> dict:
+def read_config(root: Path | None = None) -> dict[str, Any]:
     """Read config.json from storage."""
     storage = ensure_initialized(root)
     config_path = storage / "config.json"
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        result: dict[str, Any] = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise MbStorageError(f"Corrupt config.json: {e}") from e
+    return result
 
 
-def write_config(config: dict, root: Path | None = None) -> None:
+def write_config(config: dict[str, Any], root: Path | None = None) -> None:
     """Write config.json to storage."""
     storage = ensure_initialized(root)
     config_path = storage / "config.json"
@@ -112,8 +124,17 @@ def create_session(
     command: list[str],
     cwd: str | None = None,
     root: Path | None = None,
+    source: str | None = None,
+    create_events: bool = True,
 ) -> str:
     """Create a new session directory with meta.json.
+
+    Args:
+        command: Command that was executed.
+        cwd: Working directory (defaults to cwd).
+        root: Storage root path.
+        source: Optional source tag (e.g. "hook").
+        create_events: If True (default), create empty events.jsonl.
 
     Returns:
         The session_id.
@@ -123,7 +144,7 @@ def create_session(
     session_dir = storage / "sessions" / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    meta = {
+    meta: dict[str, Any] = {
         "session_id": session_id,
         "command": command,
         "cwd": cwd or str(Path.cwd()),
@@ -131,12 +152,15 @@ def create_session(
         "ended_at": None,
         "exit_code": None,
     }
+    if source is not None:
+        meta["source"] = source
+
     (session_dir / "meta.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
     )
 
-    # Create empty events file
-    (session_dir / "events.jsonl").touch()
+    if create_events:
+        (session_dir / "events.jsonl").touch()
 
     return session_id
 
@@ -168,16 +192,17 @@ def write_event(
 
 def finalize_session(
     session_id: str,
-    exit_code: int,
+    exit_code: int | None = None,
     root: Path | None = None,
 ) -> None:
-    """Update meta.json with end time and exit code."""
+    """Update meta.json with end time and optionally exit code."""
     storage = root or _storage_root()
     meta_path = storage / "sessions" / session_id / "meta.json"
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["ended_at"] = time.time()
-    meta["exit_code"] = exit_code
+    if exit_code is not None:
+        meta["exit_code"] = exit_code
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
@@ -193,7 +218,7 @@ def delete_session(session_id: str, root: Path | None = None) -> bool:
     return True
 
 
-def list_sessions(root: Path | None = None) -> list[dict]:
+def list_sessions(root: Path | None = None) -> list[dict[str, Any]]:
     """Read all session meta.json files, sorted by start time descending."""
     storage = root or _storage_root()
     sessions_dir = storage / "sessions"
@@ -208,7 +233,11 @@ def list_sessions(root: Path | None = None) -> list[dict]:
         meta_path = entry / "meta.json"
         if not meta_path.exists():
             continue
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Skipping corrupt session %s", entry.name)
+            continue
         sessions.append(meta)
 
     sessions.sort(key=lambda s: s.get("started_at", 0), reverse=True)

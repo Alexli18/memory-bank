@@ -10,56 +10,30 @@ Always exits 0 — never blocks Claude.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
-def _load_hooks_state(storage_root: Path) -> dict:
+def _load_hooks_state(storage_root: Path) -> dict[str, Any]:
     path = storage_root / "hooks_state.json"
     if not path.exists():
         return {"sessions": {}}
-    return json.loads(path.read_text(encoding="utf-8"))
+    result: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return result
 
 
-def _save_hooks_state(storage_root: Path, state: dict) -> None:
+def _save_hooks_state(storage_root: Path, state: dict[str, Any]) -> None:
     path = storage_root / "hooks_state.json"
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     tmp.rename(path)
 
 
-def _create_hook_session(storage_root: Path, cwd: str) -> str:
-    """Create a new session directory with meta.json (source=hook, no events.jsonl)."""
-    from mb.storage import generate_session_id
-
-    session_id = generate_session_id()
-    session_dir = storage_root / "sessions" / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    meta = {
-        "session_id": session_id,
-        "command": ["claude"],
-        "cwd": cwd,
-        "started_at": time.time(),
-        "ended_at": None,
-        "exit_code": None,
-        "source": "hook",
-    }
-    (session_dir / "meta.json").write_text(
-        json.dumps(meta, indent=2) + "\n", encoding="utf-8"
-    )
-    return session_id
-
-
-def _update_meta(storage_root: Path, session_id: str) -> None:
-    """Update ended_at timestamp in meta.json."""
-    meta_path = storage_root / "sessions" / session_id / "meta.json"
-    if not meta_path.exists():
-        return
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["ended_at"] = time.time()
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
 def _process_hook(
@@ -85,7 +59,11 @@ def _process_hook(
 
     if mapping is None:
         # New session
-        session_id = _create_hook_session(storage_root, cwd)
+        from mb.storage import create_session
+        session_id = create_session(
+            ["claude"], cwd=cwd, root=storage_root,
+            source="hook", create_events=False,
+        )
         sessions[claude_session_id] = {
             "mb_session_id": session_id,
             "transcript_path": transcript_path,
@@ -117,7 +95,8 @@ def _process_hook(
             f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
 
     # Update meta ended_at
-    _update_meta(storage_root, session_id)
+    from mb.storage import finalize_session
+    finalize_session(session_id, root=storage_root)
 
     # Update state
     sessions[claude_session_id]["transcript_size"] = transcript_size
@@ -131,6 +110,7 @@ def main() -> None:
         raw = sys.stdin.read()
         payload = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
+        logger.debug("Failed to parse hook stdin payload")
         return
 
     transcript_path = payload.get("transcript_path")
@@ -160,5 +140,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        pass
+        logger.debug("Hook handler failed", exc_info=True)
     sys.exit(0)

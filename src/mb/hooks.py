@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 HOOK_MARKER = "mb.hook_handler"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -14,7 +15,7 @@ def _settings_path() -> Path:
     return SETTINGS_PATH
 
 
-def _find_mb_hook(stop_hooks: list[dict]) -> int | None:
+def _find_mb_hook(stop_hooks: list[dict[str, Any]]) -> int | None:
     """Find the index of the mb hook entry by matching HOOK_MARKER in command."""
     for i, entry in enumerate(stop_hooks):
         for hook in entry.get("hooks", []):
@@ -84,7 +85,7 @@ def uninstall_hooks(settings_path: Path | None = None) -> tuple[bool, str]:
     return True, "Memory Bank hook uninstalled."
 
 
-def hooks_status(settings_path: Path | None = None) -> dict:
+def hooks_status(settings_path: Path | None = None) -> dict[str, Any]:
     """Check if mb hook is installed.
 
     Returns dict with 'installed' bool and 'command' str if installed.

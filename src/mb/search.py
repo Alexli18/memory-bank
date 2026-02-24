@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from mb.chunker import chunk_all_sessions
 from mb.ollama_client import OllamaClient
+
+logger = logging.getLogger(__name__)
 
 
 VECTOR_DIM = 768
@@ -23,7 +27,7 @@ class VectorIndex:
         self.vectors_path = index_dir / "vectors.bin"
         self.metadata_path = index_dir / "metadata.jsonl"
 
-    def add(self, vector: list[float], metadata: dict) -> None:
+    def add(self, vector: list[float], metadata: dict[str, Any]) -> None:
         """Normalize and append a vector with its metadata."""
         arr = np.array(vector, dtype=np.float32)
         norm = np.linalg.norm(arr)
@@ -38,7 +42,7 @@ class VectorIndex:
         with self.metadata_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(metadata, ensure_ascii=False) + "\n")
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict]:
+    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         """Search for top-K similar vectors by cosine similarity.
 
         Uses memory-mapped I/O for the vectors file so that only the pages
@@ -61,6 +65,10 @@ class VectorIndex:
         # Integrity check: verify metadata line count matches
         n_metadata = self._count_metadata_lines()
         if n_metadata != n_vectors:
+            logger.warning(
+                "Index integrity: %d vectors vs %d metadata; truncating",
+                n_vectors, n_metadata,
+            )
             n_vectors = min(n_vectors, n_metadata)
 
         if n_vectors == 0:
@@ -112,7 +120,7 @@ class VectorIndex:
                     count += 1
         return count
 
-    def _load_metadata_at_indices(self, indices: set[int]) -> dict[int, dict]:
+    def _load_metadata_at_indices(self, indices: set[int]) -> dict[int, dict[str, Any]]:
         """Load metadata only for the requested line indices (0-based).
 
         Iterates the file once and exits early when all requested indices
@@ -120,7 +128,7 @@ class VectorIndex:
         """
         if not self.metadata_path.exists() or not indices:
             return {}
-        result: dict[int, dict] = {}
+        result: dict[int, dict[str, Any]] = {}
         idx = 0
         with self.metadata_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -133,7 +141,7 @@ class VectorIndex:
                 idx += 1
         return result
 
-    def _load_metadata(self) -> list[dict]:
+    def _load_metadata(self) -> list[dict[str, Any]]:
         """Load all metadata lines."""
         if not self.metadata_path.exists():
             return []
@@ -208,7 +216,7 @@ def build_index(storage_root: Path, ollama_client: OllamaClient) -> VectorIndex:
             continue
 
         # Read existing chunks
-        chunks: list[dict] = []
+        chunks: list[dict[str, Any]] = []
         with chunks_path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -243,7 +251,7 @@ def semantic_search(
     top_k: int,
     storage_root: Path,
     ollama_client: OllamaClient | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Orchestrate semantic search: ensure index, embed query, search.
 
     Args:
@@ -256,15 +264,11 @@ def semantic_search(
         List of result dicts with score, chunk_id, session_id, text, timestamps.
     """
     if ollama_client is None:
+        from mb.ollama_client import client_from_config
         from mb.storage import read_config
 
         config = read_config(storage_root)
-        ollama_cfg = config.get("ollama", {})
-        ollama_client = OllamaClient(
-            base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
-            embed_model=ollama_cfg.get("embed_model", "nomic-embed-text"),
-            chat_model=ollama_cfg.get("chat_model", "gemma3:4b"),
-        )
+        ollama_client = client_from_config(config)
 
     # Build/update index
     index = build_index(storage_root, ollama_client)

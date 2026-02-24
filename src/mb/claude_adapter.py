@@ -7,10 +7,16 @@ and extracts clean turn-based content for chunking, bypassing raw PTY output.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+from mb.chunker import _quality_score
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,11 +42,14 @@ def encode_project_dir(cwd: str) -> str:
     """Encode a project path to Claude Code's directory name format.
 
     /home/user/my-project -> -home-user-my-project
+    /Users/alex/SG_prod   -> -Users-alex-SG-prod
+
+    Claude Code replaces both '/' and '_' with '-'.
     """
     path = cwd.rstrip("/")
     if path.startswith("/"):
         path = path[1:]
-    return "-" + path.replace("/", "-")
+    return "-" + path.replace("/", "-").replace("_", "-")
 
 
 def find_claude_session_file(
@@ -106,6 +115,7 @@ def extract_turns(session_file: Path) -> list[Turn]:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
+                logger.debug("Skipping malformed JSONL line in %s", session_file)
                 continue
 
             # Skip non-message lines
@@ -236,7 +246,7 @@ def chunks_from_turns(
     session_id: str,
     max_tokens: int = 512,
     overlap_tokens: int = 50,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Generate chunk dicts from Turn objects.
 
     Shared by hook_handler (direct transcript) and chunk_claude_session (PTY path).
@@ -245,7 +255,7 @@ def chunks_from_turns(
     """
     max_chars = max_tokens * 4
     overlap_chars = overlap_tokens * 4
-    chunks: list[dict] = []
+    chunks: list[dict[str, Any]] = []
     chunk_index = 0
 
     for turn in turns:
@@ -288,7 +298,7 @@ def chunk_claude_session(
     session_dir: Path,
     max_tokens: int = 512,
     overlap_tokens: int = 50,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Generate chunks from a Claude Code native session file.
 
     Reads meta.json to find session params, locates the corresponding
@@ -355,16 +365,7 @@ def _split_turn_text(text: str, max_chars: int) -> list[str]:
     return segments
 
 
-def _quality_score(text: str) -> float:
-    """Score chunk quality: ratio of alphanumeric content to total length."""
-    if not text or not text.strip():
-        return 0.0
-    stripped = text.strip()
-    alnum_count = sum(1 for c in stripped if c.isalnum())
-    return round(alnum_count / len(stripped), 3) if stripped else 0.0
-
-
-def is_claude_session(meta: dict) -> bool:
+def is_claude_session(meta: dict[str, Any]) -> bool:
     """Check if a session was a Claude Code session based on meta.json."""
     command = meta.get("command", [])
     if not command:

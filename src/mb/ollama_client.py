@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 
@@ -91,7 +93,8 @@ class OllamaClient:
         resp.raise_for_status()
 
         data = resp.json()
-        return data["embeddings"]
+        embeddings: list[list[float]] = data["embeddings"]
+        return embeddings
 
     def chat(
         self,
@@ -100,7 +103,7 @@ class OllamaClient:
         as_json: bool = False,
         temperature: float = 0.0,
         seed: int = 42,
-    ) -> dict | str:
+    ) -> dict[str, Any] | str:
         """Send a chat request via POST /api/chat with stream=false.
 
         Args:
@@ -118,7 +121,7 @@ class OllamaClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
 
-        payload: dict = {
+        payload: dict[str, Any] = {
             "model": self.chat_model,
             "messages": messages,
             "stream": False,
@@ -156,6 +159,18 @@ class OllamaClient:
         if as_json:
             import json
 
-            return json.loads(content)
+            parsed: dict[str, Any] = json.loads(content)
+            return parsed
 
-        return content
+        result: str = content
+        return result
+
+
+def client_from_config(config: dict[str, Any]) -> OllamaClient:
+    """Create an OllamaClient from a config dict (as returned by storage.read_config)."""
+    ollama_cfg = config.get("ollama", {})
+    return OllamaClient(
+        base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
+        embed_model=ollama_cfg.get("embed_model", "nomic-embed-text"),
+        chat_model=ollama_cfg.get("chat_model", "gemma3:4b"),
+    )

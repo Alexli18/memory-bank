@@ -7,10 +7,11 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 from xml.sax.saxutils import escape
 
 from mb.chunker import _quality_score, chunk_all_sessions
-from mb.ollama_client import OllamaClient
+from mb.ollama_client import client_from_config
 from mb.state import _state_is_stale, generate_state, load_state
 from mb.storage import read_config
 
@@ -38,12 +39,7 @@ def build_pack(budget: int, storage_root: Path) -> str:
         Raw XML string.
     """
     config = read_config(storage_root)
-    ollama_cfg = config.get("ollama", {})
-    client = OllamaClient(
-        base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
-        embed_model=ollama_cfg.get("embed_model", "nomic-embed-text"),
-        chat_model=ollama_cfg.get("chat_model", "gemma3:4b"),
-    )
+    client = client_from_config(config)
 
     # Ensure all sessions are chunked before loading state
     chunk_all_sessions(storage_root)
@@ -62,7 +58,7 @@ def build_pack(budget: int, storage_root: Path) -> str:
     return xml
 
 
-def _build_sections(state: dict, storage_root: Path) -> dict[str, str]:
+def _build_sections(state: dict[str, Any], storage_root: Path) -> dict[str, str]:
     """Build XML content for each section from state data."""
     sections: dict[str, str] = {}
 
@@ -199,7 +195,7 @@ def _collect_recent_excerpts(
     min_quality: float = 0.30,
     min_length: int = 30,
     max_excerpts: int = 200,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Collect most recent chunks from all sessions, bounded by *max_excerpts*.
 
     Uses a min-heap keyed by ``ts_end`` so that at most *max_excerpts*

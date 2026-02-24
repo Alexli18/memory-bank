@@ -6,6 +6,7 @@ import heapq
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from mb.chunker import chunk_all_sessions
 from mb.ollama_client import OllamaClient
@@ -81,7 +82,7 @@ Output ONLY valid JSON, no markdown, no explanations."""
 def generate_state(
     storage_root: Path,
     ollama_client: OllamaClient,
-) -> dict:
+) -> dict[str, Any]:
     """Generate ProjectState from session chunks via LLM.
 
     Uses chunks (cleaned, quality-filtered text from chunker/claude_adapter)
@@ -151,12 +152,13 @@ def generate_state(
     return result
 
 
-def load_state(storage_root: Path) -> dict | None:
+def load_state(storage_root: Path) -> dict[str, Any] | None:
     """Load existing state.json if present."""
     state_path = storage_root / "state" / "state.json"
     if not state_path.exists():
         return None
-    return json.loads(state_path.read_text(encoding="utf-8"))
+    result: dict[str, Any] = json.loads(state_path.read_text(encoding="utf-8"))
+    return result
 
 
 def _state_is_stale(storage_root: Path) -> bool:
