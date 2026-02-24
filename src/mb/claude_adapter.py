@@ -14,14 +14,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from mb.chunker import _quality_score
+from mb.models import Chunk, quality_score
+from mb.store import NdjsonStorage
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Turn:
-    """A single user→assistant conversation turn."""
+    """A single user->assistant conversation turn."""
 
     turn_number: int
     user_message: str
@@ -246,16 +247,16 @@ def chunks_from_turns(
     session_id: str,
     max_tokens: int = 512,
     overlap_tokens: int = 50,
-) -> list[dict[str, Any]]:
-    """Generate chunk dicts from Turn objects.
+) -> list[Chunk]:
+    """Generate Chunk objects from Turn objects.
 
     Shared by hook_handler (direct transcript) and chunk_claude_session (PTY path).
 
-    Returns list of chunk dicts compatible with the standard chunker output.
+    Returns list of Chunk objects compatible with the standard chunker output.
     """
     max_chars = max_tokens * 4
     overlap_chars = overlap_tokens * 4
-    chunks: list[dict[str, Any]] = []
+    chunks: list[Chunk] = []
     chunk_index = 0
 
     for turn in turns:
@@ -271,7 +272,7 @@ def chunks_from_turns(
             chunk_text = overlap_text + seg if overlap_text else seg
             token_estimate = len(chunk_text) // 4
 
-            chunk = {
+            chunk = Chunk.from_dict({
                 "chunk_id": f"{session_id}-{chunk_index}",
                 "session_id": session_id,
                 "index": chunk_index,
@@ -279,10 +280,10 @@ def chunks_from_turns(
                 "ts_start": turn_ts,
                 "ts_end": turn_ts,
                 "token_estimate": token_estimate,
-                "quality_score": _quality_score(chunk_text),
+                "quality_score": quality_score(chunk_text),
                 "source": "claude_native",
                 "turn_number": turn.turn_number,
-            }
+            })
             chunks.append(chunk)
             chunk_index += 1
 
@@ -295,28 +296,25 @@ def chunks_from_turns(
 
 
 def chunk_claude_session(
-    session_dir: Path,
+    storage: NdjsonStorage,
+    session_id: str,
     max_tokens: int = 512,
     overlap_tokens: int = 50,
-) -> list[dict[str, Any]]:
+) -> list[Chunk]:
     """Generate chunks from a Claude Code native session file.
 
-    Reads meta.json to find session params, locates the corresponding
+    Reads session meta from storage, locates the corresponding
     Claude Code JSONL, extracts turns, and generates meaningful chunks.
 
-    Returns list of chunk dicts compatible with the standard chunker output.
+    Returns list of Chunk objects compatible with the standard chunker output.
     """
-    meta_path = session_dir / "meta.json"
-    if not meta_path.exists():
+    meta = storage.read_meta(session_id)
+    if meta is None:
         return []
 
-    with meta_path.open("r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    cwd = meta.get("cwd", "")
-    started_at = meta.get("started_at", 0)
-    ended_at = meta.get("ended_at")
-    session_id = meta.get("session_id", session_dir.name)
+    cwd = meta.cwd
+    started_at = meta.started_at
+    ended_at = meta.ended_at
 
     session_file = find_claude_session_file(cwd, started_at, ended_at)
     if session_file is None:
@@ -328,11 +326,8 @@ def chunk_claude_session(
 
     chunks = chunks_from_turns(turns, session_id, max_tokens, overlap_tokens)
 
-    # Write chunks.jsonl
-    chunks_path = session_dir / "chunks.jsonl"
-    with chunks_path.open("w", encoding="utf-8") as f:
-        for chunk in chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+    # Write chunks via storage
+    storage.write_chunks(session_id, chunks)
 
     return chunks
 

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mb.storage import DEFAULT_CONFIG
+from mb.store import NdjsonStorage
 
 
 @pytest.fixture()
@@ -24,6 +25,12 @@ def storage_root(tmp_path: Path) -> Path:
         json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8"
     )
     return root
+
+
+@pytest.fixture()
+def storage(storage_root: Path) -> NdjsonStorage:
+    """NdjsonStorage backed by the same storage_root fixture."""
+    return NdjsonStorage(storage_root)
 
 
 @pytest.fixture()

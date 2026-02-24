@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import heapq
-import json
 import time
-from pathlib import Path
-from typing import Any
-
 from mb.chunker import chunk_all_sessions
+from mb.models import ProjectState
 from mb.ollama_client import OllamaClient
+from mb.store import NdjsonStorage
 
 
 def _sample_chunks_for_state(
@@ -80,44 +78,30 @@ Output ONLY valid JSON, no markdown, no explanations."""
 
 
 def generate_state(
-    storage_root: Path,
+    storage: NdjsonStorage,
     ollama_client: OllamaClient,
-) -> dict[str, Any]:
+) -> ProjectState:
     """Generate ProjectState from session chunks via LLM.
 
     Uses chunks (cleaned, quality-filtered text from chunker/claude_adapter)
     instead of raw events to avoid TUI noise. Sends concatenated chunk text
     to Ollama chat with deterministic settings (temperature=0.0, seed=42).
 
-    Saves result to state/state.json.
+    Saves result to state/state.json via storage.
     """
     # Ensure all sessions are chunked (triggers claude_adapter for Claude sessions)
-    chunk_all_sessions(storage_root, force=True)
+    chunk_all_sessions(storage, force=True)
 
-    sessions_dir = storage_root / "sessions"
     all_chunks: list[tuple[float, float, str]] = []
     source_sessions: list[str] = []
 
-    if sessions_dir.exists():
-        for session_dir in sorted(sessions_dir.iterdir()):
-            if not session_dir.is_dir():
-                continue
-            chunks_path = session_dir / "chunks.jsonl"
-            if not chunks_path.exists():
-                continue
-
-            source_sessions.append(session_dir.name)
-            with chunks_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    chunk = json.loads(line)
-                    text = chunk.get("text", "").strip()
-                    quality = chunk.get("quality_score", 0)
-                    ts_end = chunk.get("ts_end", 0)
-                    if text and quality >= 0.3:
-                        all_chunks.append((quality, ts_end, text))
+    for chunk in storage.iter_all_chunks():
+        text = chunk.text.strip()
+        if not text or chunk.quality_score < 0.3:
+            continue
+        if chunk.session_id not in source_sessions:
+            source_sessions.append(chunk.session_id)
+        all_chunks.append((chunk.quality_score, chunk.ts_end, text))
 
     combined_text = _sample_chunks_for_state(all_chunks)
 
@@ -141,39 +125,17 @@ def generate_state(
     result["updated_at"] = time.time()
     result["source_sessions"] = source_sessions
 
-    # Save to state/state.json
-    state_dir = storage_root / "state"
-    state_dir.mkdir(exist_ok=True)
-    state_path = state_dir / "state.json"
-    state_path.write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    state = ProjectState.from_dict(result)
+    storage.save_state(state)
 
-    return result
+    return state
 
 
-def load_state(storage_root: Path) -> dict[str, Any] | None:
+def load_state(storage: NdjsonStorage) -> ProjectState | None:
     """Load existing state.json if present."""
-    state_path = storage_root / "state" / "state.json"
-    if not state_path.exists():
-        return None
-    result: dict[str, Any] = json.loads(state_path.read_text(encoding="utf-8"))
-    return result
+    return storage.load_state()
 
 
-def _state_is_stale(storage_root: Path) -> bool:
+def _state_is_stale(storage: NdjsonStorage) -> bool:
     """Check if any session's chunks.jsonl is newer than state.json."""
-    state_path = storage_root / "state" / "state.json"
-    if not state_path.exists():
-        return False
-    sessions_dir = storage_root / "sessions"
-    if not sessions_dir.exists():
-        return False
-    state_mtime = state_path.stat().st_mtime
-    for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir():
-            continue
-        chunks_path = session_dir / "chunks.jsonl"
-        if chunks_path.exists() and chunks_path.stat().st_mtime > state_mtime:
-            return True
-    return False
+    return storage.is_stale()

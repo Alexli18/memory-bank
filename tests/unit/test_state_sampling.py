@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from mb.state import _sample_chunks_for_state, _state_is_stale
+from mb.store import NdjsonStorage
 
 
 def test_sample_all_fit() -> None:
@@ -90,47 +91,50 @@ def test_sample_chronological_output() -> None:
 # --- _state_is_stale ---
 
 
-def _setup_storage(tmp_path: Path, *, with_state: bool = True, with_session: bool = True) -> Path:
-    """Create a minimal storage_root with optional state.json and session chunks."""
-    storage = tmp_path / ".memory-bank"
+def _setup_storage(tmp_path: Path, *, with_state: bool = True, with_session: bool = True) -> NdjsonStorage:
+    """Create a minimal NdjsonStorage with optional state.json and session chunks."""
+    root = tmp_path / ".memory-bank"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text('{"version": "1.0"}', encoding="utf-8")
+    (root / "sessions").mkdir(exist_ok=True)
     if with_state:
-        state_dir = storage / "state"
+        state_dir = root / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "state.json").write_text('{"summary":"test"}')
     if with_session:
-        session_dir = storage / "sessions" / "sess1"
+        session_dir = root / "sessions" / "sess1"
         session_dir.mkdir(parents=True)
         (session_dir / "chunks.jsonl").write_text('{"text":"chunk"}\n')
-    return storage
+    return NdjsonStorage(root)
 
 
 def test_state_is_stale_when_chunks_newer(tmp_path: Path) -> None:
-    """chunks.jsonl newer than state.json → stale."""
+    """chunks.jsonl newer than state.json -> stale."""
     storage = _setup_storage(tmp_path)
     # Ensure state.json is older than chunks.jsonl
-    state_path = storage / "state" / "state.json"
+    state_path = storage.root / "state" / "state.json"
     old_time = time.time() - 100
     os.utime(state_path, (old_time, old_time))
     assert _state_is_stale(storage) is True
 
 
 def test_state_is_stale_returns_false_when_state_newer(tmp_path: Path) -> None:
-    """state.json newer than chunks.jsonl → not stale."""
+    """state.json newer than chunks.jsonl -> not stale."""
     storage = _setup_storage(tmp_path)
     # Ensure chunks.jsonl is older than state.json
-    chunks_path = storage / "sessions" / "sess1" / "chunks.jsonl"
+    chunks_path = storage.root / "sessions" / "sess1" / "chunks.jsonl"
     old_time = time.time() - 100
     os.utime(chunks_path, (old_time, old_time))
     assert _state_is_stale(storage) is False
 
 
 def test_state_is_stale_no_state_file(tmp_path: Path) -> None:
-    """No state.json → not stale (nothing to invalidate)."""
+    """No state.json -> not stale (nothing to invalidate)."""
     storage = _setup_storage(tmp_path, with_state=False)
     assert _state_is_stale(storage) is False
 
 
 def test_state_is_stale_no_sessions(tmp_path: Path) -> None:
-    """No sessions dir → not stale."""
+    """No sessions dir -> not stale."""
     storage = _setup_storage(tmp_path, with_session=False)
     assert _state_is_stale(storage) is False

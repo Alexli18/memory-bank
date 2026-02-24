@@ -6,7 +6,8 @@ import json
 import time
 from pathlib import Path
 
-from mb.hook_handler import _process_hook, _load_hooks_state, main
+from mb.hook_handler import _process_hook, main
+from mb.store import NdjsonStorage
 
 
 def _write_claude_jsonl(path: Path, messages: list[dict]) -> None:
@@ -49,7 +50,8 @@ def test_process_creates_session(tmp_path: Path) -> None:
     )
 
     # Check hooks_state.json
-    state = _load_hooks_state(storage_root)
+    storage = NdjsonStorage(storage_root)
+    state = storage.load_hooks_state()
     assert "test-uuid-1" in state["sessions"]
     session_id = state["sessions"]["test-uuid-1"]["mb_session_id"]
 
@@ -85,7 +87,8 @@ def test_process_updates_existing(tmp_path: Path) -> None:
         storage_root=storage_root,
     )
 
-    state = _load_hooks_state(storage_root)
+    storage = NdjsonStorage(storage_root)
+    state = storage.load_hooks_state()
     session_id = state["sessions"]["test-uuid-2"]["mb_session_id"]
 
     # Append more content to transcript
@@ -109,7 +112,7 @@ def test_process_updates_existing(tmp_path: Path) -> None:
     )
 
     # Same session_id, updated chunks
-    state = _load_hooks_state(storage_root)
+    state = storage.load_hooks_state()
     assert state["sessions"]["test-uuid-2"]["mb_session_id"] == session_id
 
     session_dir = storage_root / "sessions" / session_id
@@ -135,7 +138,8 @@ def test_process_skips_unchanged(tmp_path: Path) -> None:
         storage_root=storage_root,
     )
 
-    state_before = _load_hooks_state(storage_root)
+    storage = NdjsonStorage(storage_root)
+    state_before = storage.load_hooks_state()
     ts_before = state_before["sessions"]["test-uuid-3"]["last_processed"]
 
     # Small delay to detect timestamp change
@@ -148,7 +152,7 @@ def test_process_skips_unchanged(tmp_path: Path) -> None:
         storage_root=storage_root,
     )
 
-    state_after = _load_hooks_state(storage_root)
+    state_after = storage.load_hooks_state()
     ts_after = state_after["sessions"]["test-uuid-3"]["last_processed"]
 
     # last_processed should NOT have changed — it was a no-op
@@ -189,7 +193,8 @@ def test_process_handles_empty_transcript(tmp_path: Path) -> None:
         storage_root=storage_root,
     )
 
-    state = _load_hooks_state(storage_root)
+    storage = NdjsonStorage(storage_root)
+    state = storage.load_hooks_state()
     assert "test-uuid-empty" not in state.get("sessions", {})
 
 
@@ -208,7 +213,8 @@ def test_meta_has_source_hook(tmp_path: Path) -> None:
         storage_root=storage_root,
     )
 
-    state = _load_hooks_state(storage_root)
+    storage = NdjsonStorage(storage_root)
+    state = storage.load_hooks_state()
     session_id = state["sessions"]["test-uuid-source"]["mb_session_id"]
     meta_path = storage_root / "sessions" / session_id / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))

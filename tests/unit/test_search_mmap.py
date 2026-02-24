@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from mb.models import SearchResult
 from mb.search import VECTOR_DIM, VectorIndex
 
 
@@ -36,10 +37,11 @@ def test_search_returns_results_with_mmap(tmp_path: Path) -> None:
     results = idx.search(query, top_k=5)
 
     assert len(results) == 5
-    assert all("score" in r for r in results)
-    assert all("chunk_id" in r for r in results)
+    assert all(isinstance(r, SearchResult) for r in results)
+    assert all(r.score is not None for r in results)
+    assert all(r.chunk_id for r in results)
     # Scores should be descending
-    scores = [r["score"] for r in results]
+    scores = [r.score for r in results]
     assert scores == sorted(scores, reverse=True)
 
 
@@ -80,7 +82,7 @@ def test_search_integrity_mismatch(tmp_path: Path) -> None:
 
     # Should get at most 3 results (min of vectors=5, metadata=3)
     assert len(results) <= 3
-    assert all("score" in r for r in results)
+    assert all(isinstance(r, SearchResult) for r in results)
 
 
 def test_count_metadata_lines(tmp_path: Path) -> None:
