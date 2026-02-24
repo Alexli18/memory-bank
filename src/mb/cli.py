@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from mb import __version__
 from mb.store import NdjsonStorage
+
+if TYPE_CHECKING:
+    from mb.graph import EpisodeType
+    from mb.models import Chunk
+    from mb.retriever import ContextualRetriever
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -47,11 +53,11 @@ def _require_storage() -> NdjsonStorage:
 class _EpisodeRetrieverAdapter:
     """Adapts ContextualRetriever.retrieve_by_episode to Retriever protocol."""
 
-    def __init__(self, ctx_retriever: object, episode_type: object) -> None:
+    def __init__(self, ctx_retriever: ContextualRetriever, episode_type: EpisodeType) -> None:
         self._ctx_retriever = ctx_retriever
         self._episode_type = episode_type
 
-    def retrieve(self, storage: NdjsonStorage) -> list:
+    def retrieve(self, storage: NdjsonStorage) -> list[Chunk]:
         return self._ctx_retriever.retrieve_by_episode(storage, self._episode_type)
 
 
