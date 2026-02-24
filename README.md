@@ -9,10 +9,40 @@
 </p>
 
 <p align="center">
-  Capture, search, and restore LLM session context across sessions.
+  <strong>Never lose context between LLM sessions again.</strong><br>
+  Capture, search, and restore AI coding assistant conversations across sessions.
 </p>
 
-Memory Bank automatically records your conversations with AI coding assistants (Claude Code, Codex, etc.), indexes them for semantic search, and generates context packs you can paste into fresh sessions to restore project knowledge.
+> **Note:** Memory Bank is in early alpha. APIs and storage formats may change between versions. Bug reports and feedback are welcome!
+
+## Highlights
+
+- **Zero-friction capture** -- a Claude Code hook records every session automatically, no wrappers needed
+- **Retroactive import** -- `mb import` brings in all your historical Claude Code sessions instantly
+- **Semantic search** -- find past decisions, code discussions, and debugging sessions by meaning, not keywords
+- **Context packs** -- generate a portable XML/JSON/Markdown summary and paste it into a fresh LLM session to restore full project knowledge
+- **Episode classification** -- sessions are auto-tagged by type (build, test, debug, refactor, etc.) with error detection
+- **Per-project isolation** -- each project gets its own `.memory-bank/` directory, the hook works globally
+
+<!-- TODO: Replace with terminal GIF recorded via vhs or asciinema -->
+<!-- Example: mb hooks install → claude session → mb search "auth" → mb pack -->
+<p align="center">
+  <em>Demo: a 30-second workflow from hook install to context pack (coming soon)</em>
+</p>
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Commands](#commands)
+- [Multi-Project Usage](#multi-project-usage)
+- [Configuration](#configuration)
+- [Data Storage](#data-storage)
+- [Workflow Examples](#workflow-examples)
+- [Troubleshooting](#troubleshooting)
+- [Contributing & Community](#contributing--community)
+- [License](#license)
 
 ## How It Works
 
@@ -35,24 +65,50 @@ Three capture modes:
 
 ## Installation
 
+### 1. Install Memory Bank
+
+With [uv](https://docs.astral.sh/uv/) (recommended):
+
 ```bash
-# With uv (recommended)
 uv pip install -e ".[dev]"
+```
 
-# Or pip
+Expected output:
+
+```
+Resolved 15 packages in 1.2s
+Installed 15 packages in 0.8s
+```
+
+Or with pip:
+
+```bash
 pip install -e ".[dev]"
+```
 
-# Verify
+### 2. Verify
+
+```bash
 mb --version
+```
+
+Expected output:
+
+```
+mb, version 0.1.0
 ```
 
 ### Requirements
 
 - Python 3.10+
 - macOS or Linux
-- [Ollama](https://ollama.com/download) (only for `search` and `pack` commands)
+- [Ollama](https://ollama.com/download) (only for `search`, `pack`, and `graph` commands -- see [Ollama dependency table](#ollama-dependency-table))
+
+> **Windows users:** Memory Bank is developed and tested on macOS and Linux. On Windows, use [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) for the best experience.
 
 ### Ollama Setup
+
+Ollama is only needed for commands that use embeddings or LLM summarization. You can install hooks, import sessions, and list sessions without it.
 
 ```bash
 ollama serve                   # Start server (separate terminal)
@@ -62,29 +118,49 @@ ollama pull gemma3:4b          # Summarization model
 
 ## Quick Start
 
-### 1. Install the hook (one time)
+### Step 1. Install the hook (one time)
 
 ```bash
 mb hooks install
 ```
 
-This adds a Stop hook to `~/.claude/settings.json`. Restart Claude Code for it to take effect.
+Expected output:
 
-### 2. Use Claude Code normally
+```
+Memory Bank hook installed.
+```
+
+This adds a Stop hook to `~/.claude/settings.json`. **Restart Claude Code** for it to take effect.
+
+### Step 2. Use Claude Code normally
 
 ```bash
 claude
 ```
 
-Every time Claude responds, the hook captures the session transcript automatically. No wrappers, no extra steps.
+Every time Claude responds, the hook captures the session transcript automatically. No wrappers, no extra steps. You can verify capture is working after your first session:
 
-### 3. Search past sessions
+```bash
+mb sessions
+```
+
+Expected output:
+
+```
+SESSION                  COMMAND     STARTED               EXIT
+20260223-194057-025c     claude      2026-02-23 19:40:57   -
+```
+
+### Step 3. Search past sessions
+
+Requires Ollama running (see [Ollama Setup](#ollama-setup)).
 
 ```bash
 mb search "authentication approach"
 ```
 
-Output:
+Expected output:
+
 ```
 [0.76] Session 20260223-194057-025c (00:00 - 00:00)
   User: how should we handle auth?  Assistant: I recommend JWT with refresh tokens...
@@ -95,13 +171,15 @@ Output:
 No more results.
 ```
 
-### 4. Generate a context pack
+### Step 4. Generate a context pack
+
+Requires Ollama running (see [Ollama Setup](#ollama-setup)).
 
 ```bash
 mb pack --budget 6000
 ```
 
-Output: an XML document containing project state, decisions, constraints, tasks, and recent session excerpts -- ready to paste into a fresh Claude session.
+This outputs an XML document containing project state, decisions, constraints, tasks, and recent session excerpts -- ready to paste into a fresh Claude session.
 
 ```bash
 # Save to file
@@ -109,6 +187,22 @@ mb pack --budget 6000 --out context.xml
 ```
 
 ## Commands
+
+### Ollama Dependency Table
+
+| Command | Requires Ollama | Description |
+|---------|:-:|-------------|
+| `mb hooks install` | No | Install Claude Code capture hook |
+| `mb hooks uninstall` | No | Remove the capture hook |
+| `mb hooks status` | No | Check if hook is installed |
+| `mb import` | No | Import historical Claude Code sessions |
+| `mb init` | No | Initialize `.memory-bank/` storage |
+| `mb sessions` | No | List recorded sessions |
+| `mb delete` | No | Delete a session |
+| `mb run` | No | Capture any CLI via PTY wrapper |
+| `mb search` | **Yes** | Semantic search across sessions |
+| `mb graph` | **Yes** | Session graph with episode classification |
+| `mb pack` | **Yes** | Generate context pack for session restore |
 
 ### `mb hooks install`
 
@@ -405,6 +499,50 @@ mb delete 20260223-192329-f3e9
 
 ## Troubleshooting
 
+### Common Installation Issues
+
+**`pip install` fails with "externally managed environment":**
+
+This happens on newer Python installations that use PEP 668. Use `uv` instead:
+
+```bash
+uv pip install -e ".[dev]"
+```
+
+Or create a virtual environment first:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+**`command not found: mb` after installation:**
+
+The `mb` script may not be on your PATH. Try:
+
+```bash
+# Check where it was installed
+pip show -f memory-bank | grep mb
+
+# Or run via python module
+python -m mb --version
+```
+
+**Python version mismatch:**
+
+Memory Bank requires Python 3.10+. Check your version:
+
+```bash
+python --version
+```
+
+If you have multiple Python versions, use the correct one:
+
+```bash
+python3.12 -m pip install -e ".[dev]"
+```
+
 ### Hook not capturing sessions
 
 1. Check hook is installed: `mb hooks status`
@@ -426,15 +564,14 @@ rm .memory-bank/state/state.json
 mb pack --budget 6000
 ```
 
-## Development
+## Contributing & Community
 
-```bash
-# Run tests
-uv run pytest tests/ -v
+We welcome contributions of all kinds! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding guidelines, and the PR workflow.
 
-# Lint
-uv run ruff check .
+- [Code of Conduct](CODE_OF_CONDUCT.md) — our community standards
+- [Security Policy](SECURITY.md) — how to report vulnerabilities
+- [GitHub Discussions](https://github.com/Alexli18/memory-bank/discussions) — ask questions and share ideas
 
-# Run a specific test file
-uv run pytest tests/unit/test_hooks.py -v
-```
+## License
+
+Memory Bank is licensed under the [GNU General Public License v3.0](LICENSE).
