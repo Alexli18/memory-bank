@@ -132,24 +132,22 @@ def test_generate_session_id_format_and_uniqueness() -> None:
 
 def test_create_session_default(storage_root: Path) -> None:
     """create_session with defaults creates meta.json and events.jsonl."""
-    session_id = create_session(
+    session_meta = create_session(
         command=["python", "app.py"],
         cwd="/tmp/project",
         root=storage_root,
     )
 
-    session_dir = storage_root / "sessions" / session_id
-    assert session_dir.is_dir()
+    # create_session returns SessionMeta
+    assert session_meta.command == ["python", "app.py"]
+    assert session_meta.cwd == "/tmp/project"
+    assert isinstance(session_meta.started_at, float)
+    assert session_meta.ended_at is None
+    assert session_meta.exit_code is None
+    assert session_meta.source is None
 
-    # meta.json
-    meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["session_id"] == session_id
-    assert meta["command"] == ["python", "app.py"]
-    assert meta["cwd"] == "/tmp/project"
-    assert isinstance(meta["started_at"], float)
-    assert meta["ended_at"] is None
-    assert meta["exit_code"] is None
-    assert "source" not in meta
+    session_dir = storage_root / "sessions" / session_meta.session_id
+    assert session_dir.is_dir()
 
     # events.jsonl should be created (empty)
     events_path = session_dir / "events.jsonl"
@@ -159,17 +157,18 @@ def test_create_session_default(storage_root: Path) -> None:
 
 def test_create_session_source_hook_no_events(storage_root: Path) -> None:
     """create_session with source='hook' and create_events=False."""
-    session_id = create_session(
+    from mb.models import EventSource
+
+    session_meta = create_session(
         command=["git", "commit"],
         root=storage_root,
         source="hook",
         create_events=False,
     )
 
-    session_dir = storage_root / "sessions" / session_id
-    meta = json.loads((session_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["source"] == "hook"
+    assert session_meta.source == EventSource.HOOK
 
+    session_dir = storage_root / "sessions" / session_meta.session_id
     # events.jsonl must NOT exist
     assert not (session_dir / "events.jsonl").exists()
 
@@ -179,9 +178,10 @@ def test_create_session_source_hook_no_events(storage_root: Path) -> None:
 
 def test_write_event_appends_jsonl(storage_root: Path) -> None:
     """write_event appends valid JSONL lines to events.jsonl."""
-    session_id = create_session(
+    session_meta = create_session(
         command=["echo", "hi"], root=storage_root
     )
+    session_id = session_meta.session_id
 
     write_event(session_id, "stdout", "terminal", "Hello", ts=1.0, root=storage_root)
     write_event(session_id, "stderr", "terminal", "Warning", ts=2.0, root=storage_root)
@@ -207,16 +207,16 @@ def test_write_event_appends_jsonl(storage_root: Path) -> None:
 
 def test_finalize_session_with_exit_code(storage_root: Path) -> None:
     """finalize_session with exit_code sets both ended_at and exit_code."""
-    session_id = create_session(
+    session_meta = create_session(
         command=["pytest"], root=storage_root
     )
 
     before = time.time()
-    finalize_session(session_id, exit_code=1, root=storage_root)
+    finalize_session(session_meta.session_id, exit_code=1, root=storage_root)
     after = time.time()
 
     meta = json.loads(
-        (storage_root / "sessions" / session_id / "meta.json").read_text(encoding="utf-8")
+        (storage_root / "sessions" / session_meta.session_id / "meta.json").read_text(encoding="utf-8")
     )
     assert meta["exit_code"] == 1
     assert isinstance(meta["ended_at"], float)
@@ -225,14 +225,14 @@ def test_finalize_session_with_exit_code(storage_root: Path) -> None:
 
 def test_finalize_session_without_exit_code(storage_root: Path) -> None:
     """finalize_session with exit_code=None only sets ended_at, leaves exit_code as None."""
-    session_id = create_session(
+    session_meta = create_session(
         command=["ls"], root=storage_root
     )
 
-    finalize_session(session_id, exit_code=None, root=storage_root)
+    finalize_session(session_meta.session_id, exit_code=None, root=storage_root)
 
     meta = json.loads(
-        (storage_root / "sessions" / session_id / "meta.json").read_text(encoding="utf-8")
+        (storage_root / "sessions" / session_meta.session_id / "meta.json").read_text(encoding="utf-8")
     )
     assert meta["ended_at"] is not None
     assert meta["exit_code"] is None
@@ -245,9 +245,10 @@ def test_delete_session_removes_dir_and_returns_false_for_missing(
     storage_root: Path,
 ) -> None:
     """delete_session removes the directory; returns False for a missing session."""
-    session_id = create_session(
+    session_meta = create_session(
         command=["rm", "-rf", "/"], root=storage_root
     )
+    session_id = session_meta.session_id
     session_dir = storage_root / "sessions" / session_id
     assert session_dir.exists()
 
@@ -272,17 +273,17 @@ def test_list_sessions_sorted_desc_and_empty(storage_root: Path) -> None:
     assert list_sessions(root=storage_root) == []
 
     # Create sessions with a small delay to get distinct started_at values
-    sid1 = create_session(command=["first"], root=storage_root)
+    meta1 = create_session(command=["first"], root=storage_root)
     # Ensure the second session has a later started_at
     time.sleep(0.01)
-    sid2 = create_session(command=["second"], root=storage_root)
+    meta2 = create_session(command=["second"], root=storage_root)
 
     sessions = list_sessions(root=storage_root)
     assert len(sessions) == 2
-    # Most recent first
-    assert sessions[0]["session_id"] == sid2
-    assert sessions[1]["session_id"] == sid1
-    assert sessions[0]["started_at"] >= sessions[1]["started_at"]
+    # Most recent first — sessions are SessionMeta objects
+    assert sessions[0].session_id == meta2.session_id
+    assert sessions[1].session_id == meta1.session_id
+    assert sessions[0].started_at >= sessions[1].started_at
 
 
 # -- error handling (Phase 4G) --
@@ -299,7 +300,7 @@ def test_read_config_corrupt_json_raises_storage_error(storage_root: Path) -> No
 def test_list_sessions_skips_corrupt_meta(storage_root: Path) -> None:
     """list_sessions skips sessions with unreadable meta.json."""
     # Create a valid session
-    sid_good = create_session(command=["ok"], root=storage_root)
+    meta_good = create_session(command=["ok"], root=storage_root)
 
     # Create a session with corrupt meta
     bad_dir = storage_root / "sessions" / "corrupt-session"
@@ -309,4 +310,4 @@ def test_list_sessions_skips_corrupt_meta(storage_root: Path) -> None:
     sessions = list_sessions(root=storage_root)
     # Only the good session should be returned
     assert len(sessions) == 1
-    assert sessions[0]["session_id"] == sid_good
+    assert sessions[0].session_id == meta_good.session_id

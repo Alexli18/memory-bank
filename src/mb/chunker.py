@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
+from mb.models import Chunk, quality_score
 from mb.sanitizer import strip_terminal_noise
+from mb.store import NdjsonStorage
 
 
 def _quality_score(text: str) -> float:
-    """Score chunk quality: ratio of alphanumeric content to total length."""
-    if not text or not text.strip():
-        return 0.0
-    stripped = text.strip()
-    alnum_count = sum(1 for c in stripped if c.isalnum())
-    return round(alnum_count / len(stripped), 3) if stripped else 0.0
+    """Score chunk quality. Delegates to models.quality_score for backward compat."""
+    return quality_score(text)
 
 
-def chunk_session(events_path: Path) -> list[dict[str, Any]]:
-    """Read events.jsonl and produce deterministic text chunks.
+def chunk_session(storage: NdjsonStorage, session_id: str) -> list[Chunk]:
+    """Read events and produce deterministic text chunks.
 
     For Claude Code sessions, delegates to the Claude adapter which reads
     Claude's native structured JSONL for much higher quality chunks.
@@ -27,32 +23,29 @@ def chunk_session(events_path: Path) -> list[dict[str, Any]]:
     For other sessions, aggregates stdout events ordered by timestamp,
     segments at double newline or when token estimate exceeds 512.
 
-    Returns list of chunk dicts and writes chunks.jsonl to the same directory.
+    Returns list of Chunk objects and writes chunks via storage.
     """
-    session_dir = events_path.parent
-    session_id = session_dir.name
-
     # Try Claude adapter for Claude Code sessions
-    claude_chunks = _try_claude_adapter(session_dir)
+    claude_chunks = _try_claude_adapter(storage, session_id)
     if claude_chunks:
         return claude_chunks
 
-    # Read and filter stdout events, ordered by timestamp
+    # Read events from storage
+    all_events = storage.read_events(session_id)
+    if not all_events:
+        return []
+
+    # Filter stdout events, ordered by timestamp
+    stdout_events = [e for e in all_events if e.stream == "stdout"]
+    stdout_events.sort(key=lambda e: e.ts)
+
+    # Convert to dicts for segment processing with noise stripping
     events: list[dict[str, Any]] = []
-    with events_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            event = json.loads(line)
-            if event.get("stream") == "stdout":
-                events.append(event)
-
-    events.sort(key=lambda e: e.get("ts", 0))
-
-    # Strip terminal UI noise from event content before chunking
-    for event in events:
-        event["content"] = strip_terminal_noise(event.get("content", ""))
+    for e in stdout_events:
+        events.append({
+            "content": strip_terminal_noise(e.content),
+            "ts": e.ts,
+        })
 
     if not events:
         return []
@@ -60,8 +53,8 @@ def chunk_session(events_path: Path) -> list[dict[str, Any]]:
     # Build segments from aggregated text
     segments = _segment_events(events)
 
-    # Build chunk dicts with overlap
-    chunks: list[dict[str, Any]] = []
+    # Build chunks with overlap
+    chunks: list[Chunk] = []
     overlap_text = ""
 
     for idx, seg in enumerate(segments):
@@ -69,16 +62,16 @@ def chunk_session(events_path: Path) -> list[dict[str, Any]]:
         # Re-apply noise stripping to assembled text (UI patterns may span events)
         text = strip_terminal_noise(text)
 
-        chunk = {
-            "chunk_id": f"{session_id}-{idx}",
-            "session_id": session_id,
-            "index": idx,
-            "text": text,
-            "ts_start": seg["ts_start"],
-            "ts_end": seg["ts_end"],
-            "token_estimate": len(text) // 4,
-            "quality_score": _quality_score(text),
-        }
+        chunk = Chunk(
+            chunk_id=f"{session_id}-{idx}",
+            session_id=session_id,
+            index=idx,
+            text=text,
+            ts_start=seg["ts_start"],
+            ts_end=seg["ts_end"],
+            token_estimate=len(text) // 4,
+            quality_score=quality_score(text),
+        )
         chunks.append(chunk)
 
         # Prepare overlap for next chunk: last 200 chars (~50 tokens)
@@ -88,38 +81,35 @@ def chunk_session(events_path: Path) -> list[dict[str, Any]]:
         else:
             overlap_text = seg["text"]
 
-    # Write chunks.jsonl
-    chunks_path = session_dir / "chunks.jsonl"
-    with chunks_path.open("w", encoding="utf-8") as f:
-        for chunk in chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+    # Write chunks via storage
+    storage.write_chunks(session_id, chunks)
 
     return chunks
 
 
-def chunk_all_sessions(storage_root: Path, force: bool = False) -> None:
-    """Ensure all sessions have chunks.jsonl.
+def chunk_all_sessions(storage: NdjsonStorage, force: bool = False) -> None:
+    """Ensure all sessions have chunks.
 
     Args:
-        storage_root: Path to .memory-bank/ directory.
-        force: If True, re-chunk sessions that already have chunks.jsonl.
+        storage: NdjsonStorage instance.
+        force: If True, re-chunk sessions that already have chunks.
     """
-    sessions_dir = storage_root / "sessions"
+    sessions_dir = storage.root / "sessions"
     if not sessions_dir.exists():
         return
     for session_dir in sorted(sessions_dir.iterdir()):
         if not session_dir.is_dir():
             continue
-        chunks_path = session_dir / "chunks.jsonl"
-        if chunks_path.exists() and not force:
+        session_id = session_dir.name
+        if storage.has_chunks(session_id) and not force:
             continue
         events_path = session_dir / "events.jsonl"
         if events_path.exists():
-            chunk_session(events_path)
+            chunk_session(storage, session_id)
         else:
             # Hook-created sessions may lack events.jsonl;
             # try Claude adapter directly via meta.json
-            _try_claude_adapter(session_dir)
+            _try_claude_adapter(storage, session_id)
 
 
 def _segment_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -190,22 +180,16 @@ def _segment_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return segments
 
 
-def _try_claude_adapter(session_dir: Path) -> list[dict[str, Any]] | None:
+def _try_claude_adapter(storage: NdjsonStorage, session_id: str) -> list[Chunk] | None:
     """Try to use Claude adapter for a session. Returns None if not applicable."""
-    meta_path = session_dir / "meta.json"
-    if not meta_path.exists():
-        return None
-
-    try:
-        with meta_path.open("r", encoding="utf-8") as f:
-            meta = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    meta = storage.read_meta(session_id)
+    if meta is None:
         return None
 
     from mb.claude_adapter import is_claude_session, chunk_claude_session
 
-    if not is_claude_session(meta):
+    if not is_claude_session(meta.to_dict()):
         return None
 
-    chunks = chunk_claude_session(session_dir)
+    chunks = chunk_claude_session(storage, session_id)
     return chunks if chunks else None

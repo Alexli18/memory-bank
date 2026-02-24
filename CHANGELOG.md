@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `mb graph` command: display session graph with episode classification, error status, and related sessions (table and `--json` output)
+- `mb pack --retriever episode --episode <type>`: episode-aware chunk retrieval for context packs
+- `mb pack --format json|md`: JSON and Markdown output formats for context packs
+- `mb migrate` command: detect and apply storage schema migrations (v1→v2)
+- `mb reindex` command: rebuild embedding index from all chunks
+- Content-based episode classification for hook/import sessions: `classify_episode` analyzes chunk text when the command is `claude`, expanding beyond command-only heuristics
+- Session graph analysis: episode classification (BUILD/TEST/DEPLOY/DEBUG/REFACTOR/EXPLORE/CONFIG/DOCS/REVIEW), error detection, related session linking
+- Contextual retriever: episode-aware and failure-aware chunk retrieval
+- Secret redaction on ingestion (AWS keys, JWT, Stripe keys, API keys, passwords)
+- Schema versioning and migration support
+- Unified ingestion pipeline (Source/Processor plugin system)
+- Type-safe data models (frozen dataclasses) for all domain entities
+- Unified storage abstraction (NdjsonStorage) replacing scattered filesystem access
+
 ### Fixed
 
 - Claude adapter chunks now carry real timestamps from turn data instead of hardcoded `0.0`

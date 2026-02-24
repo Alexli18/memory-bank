@@ -216,6 +216,27 @@ Options:
 
 Requires Ollama running with `nomic-embed-text` model.
 
+### `mb graph`
+
+Display the session graph with episode classification, error detection, and related sessions.
+
+```bash
+mb graph              # Table output
+mb graph --json       # JSON output
+```
+
+Table output:
+```
+SESSION                  EPISODE     ERROR   COMMAND
+20260224-161618-0325     test        YES     pytest
+20260224-161613-dcb6     build       -       python -c print(42)
+```
+
+Options:
+- `--json` -- output as JSON array of session node objects
+
+Each session is classified by episode type (build, test, deploy, debug, refactor, explore, config, docs, review). Non-Claude commands use command-based heuristics; Claude/hook/import sessions use content-based classification by analyzing chunk text. Error detection uses exit code and error keywords in session content.
+
 ### `mb pack`
 
 Generate an XML context pack for restoring session context in a fresh LLM conversation.
@@ -224,11 +245,15 @@ Generate an XML context pack for restoring session context in a fresh LLM conver
 mb pack                        # Default budget: 6000 tokens
 mb pack --budget 4000          # Custom budget
 mb pack --budget 8000 --out context.xml  # Save to file
+mb pack --retriever episode --episode test  # Only TEST session chunks
 ```
 
 Options:
 - `--budget N` -- token budget (default: 6000)
+- `--format xml|json|md` -- output format (default: xml)
 - `--out PATH` -- write to file instead of stdout
+- `--retriever recency|episode` -- retrieval strategy (default: recency)
+- `--episode build|test|deploy|debug|refactor|explore|config|docs|review` -- episode type filter (only with `--retriever episode`)
 
 The pack contains these sections in priority order:
 1. **PROJECT_STATE** -- LLM-generated summary of the project (never truncated)
@@ -361,6 +386,14 @@ mb search "why did we choose JWT"
 mb sessions
 # Pick a session ID
 mb search "refactoring"
+```
+
+### Analyze session episodes
+
+```bash
+mb graph                                    # See episode types and errors
+mb graph --json                             # Machine-readable output
+mb pack --retriever episode --episode test  # Pack only from test sessions
 ```
 
 ### Clean up test sessions

@@ -10,7 +10,9 @@ from typing import Any
 import numpy as np
 
 from mb.chunker import chunk_all_sessions
+from mb.models import SearchResult
 from mb.ollama_client import OllamaClient
+from mb.store import NdjsonStorage
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ class VectorIndex:
         with self.metadata_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(metadata, ensure_ascii=False) + "\n")
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+    def search(self, query_vector: list[float], top_k: int = 5) -> list[SearchResult]:
         """Search for top-K similar vectors by cosine similarity.
 
         Uses memory-mapped I/O for the vectors file so that only the pages
@@ -54,7 +56,7 @@ class VectorIndex:
             top_k: Number of results to return.
 
         Returns:
-            List of dicts with 'score' and metadata fields.
+            List of SearchResult objects.
         """
         if not self.vectors_path.exists() or self.vectors_path.stat().st_size == 0:
             return []
@@ -101,11 +103,11 @@ class VectorIndex:
         # Load metadata only for the needed indices
         metadata_map = self._load_metadata_at_indices(set(top_indices))
 
-        results = []
+        results: list[SearchResult] = []
         for idx in top_indices:
             meta = metadata_map.get(int(idx), {})
             meta["score"] = float(scores[idx])
-            results.append(meta)
+            results.append(SearchResult.from_dict(meta))
 
         return results
 
@@ -180,22 +182,22 @@ def _index_is_stale(index: VectorIndex, sessions_dir: Path) -> bool:
     return False
 
 
-def build_index(storage_root: Path, ollama_client: OllamaClient) -> VectorIndex:
+def build_index(storage: NdjsonStorage, ollama_client: OllamaClient) -> VectorIndex:
     """Build or incrementally update the embedding index.
 
     Iterates sessions, chunks them, embeds via Ollama, appends to index.
     Skips sessions already indexed.  Rebuilds if chunks are newer than index.
     """
-    index_dir = storage_root / "index"
+    index_dir = storage.root / "index"
     index_dir.mkdir(exist_ok=True)
     index = VectorIndex(index_dir)
 
-    sessions_dir = storage_root / "sessions"
+    sessions_dir = storage.root / "sessions"
     if not sessions_dir.exists():
         return index
 
     # Ensure all sessions are chunked
-    chunk_all_sessions(storage_root)
+    chunk_all_sessions(storage)
 
     # If any chunks.jsonl is newer than the index, rebuild from scratch
     if _index_is_stale(index, sessions_dir):
@@ -211,18 +213,7 @@ def build_index(storage_root: Path, ollama_client: OllamaClient) -> VectorIndex:
         if session_id in already_indexed:
             continue
 
-        chunks_path = session_dir / "chunks.jsonl"
-        if not chunks_path.exists():
-            continue
-
-        # Read existing chunks
-        chunks: list[dict[str, Any]] = []
-        with chunks_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    chunks.append(json.loads(line))
-
+        chunks = storage.read_chunks(session_id)
         if not chunks:
             continue
 
@@ -230,16 +221,16 @@ def build_index(storage_root: Path, ollama_client: OllamaClient) -> VectorIndex:
         batch_size = 10
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i : i + batch_size]
-            texts = [c["text"] for c in batch]
+            texts = [c.text for c in batch]
             vectors = ollama_client.embed(texts)
 
             for chunk, vector in zip(batch, vectors):
                 metadata = {
-                    "chunk_id": chunk["chunk_id"],
-                    "session_id": chunk["session_id"],
-                    "text": chunk["text"][:500],  # Truncate for storage
-                    "ts_start": chunk["ts_start"],
-                    "ts_end": chunk["ts_end"],
+                    "chunk_id": chunk.chunk_id,
+                    "session_id": chunk.session_id,
+                    "text": chunk.text[:500],  # Truncate for storage
+                    "ts_start": chunk.ts_start,
+                    "ts_end": chunk.ts_end,
                 }
                 index.add(vector, metadata)
 
@@ -249,29 +240,28 @@ def build_index(storage_root: Path, ollama_client: OllamaClient) -> VectorIndex:
 def semantic_search(
     query: str,
     top_k: int,
-    storage_root: Path,
+    storage: NdjsonStorage,
     ollama_client: OllamaClient | None = None,
-) -> list[dict[str, Any]]:
+) -> list[SearchResult]:
     """Orchestrate semantic search: ensure index, embed query, search.
 
     Args:
         query: Natural language search query.
         top_k: Number of results to return.
-        storage_root: Path to .memory-bank/.
+        storage: NdjsonStorage instance.
         ollama_client: OllamaClient instance (created from config if None).
 
     Returns:
-        List of result dicts with score, chunk_id, session_id, text, timestamps.
+        List of SearchResult objects.
     """
     if ollama_client is None:
         from mb.ollama_client import client_from_config
-        from mb.storage import read_config
 
-        config = read_config(storage_root)
+        config = storage.read_config()
         ollama_client = client_from_config(config)
 
     # Build/update index
-    index = build_index(storage_root, ollama_client)
+    index = build_index(storage, ollama_client)
 
     # Embed query
     query_vectors = ollama_client.embed(query)

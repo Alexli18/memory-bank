@@ -14,10 +14,8 @@ import sys
 import termios
 import time
 import tty
-from pathlib import Path
 
-from mb.sanitizer import AnsiStripper
-from mb.storage import create_session, finalize_session, write_event
+from mb.store import NdjsonStorage
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,7 @@ def _set_winsize(fd: int, winsize: bytes) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
-def run_session(child_cmd: list[str], storage_root: Path) -> int:
+def run_session(child_cmd: list[str], storage: NdjsonStorage) -> tuple[int, str]:
     """Run a command in a PTY with transparent capture.
 
     Launches child_cmd in a pseudo-terminal, forwards all I/O transparently
@@ -40,19 +38,18 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
 
     Args:
         child_cmd: Command and arguments to execute.
-        storage_root: Path to .memory-bank/ directory.
+        storage: NdjsonStorage instance.
 
     Returns:
-        Child process exit code.
+        Tuple of (exit_code, session_id).
     """
-    session_id = create_session(child_cmd, root=storage_root)
+    session_meta = storage.create_session(child_cmd)
+    session_id = session_meta.session_id
     t0 = time.monotonic()
 
     # Write system start event
     try:
-        write_event(
-            session_id, "system", "system", "session_start", ts=0.0, root=storage_root
-        )
+        storage.write_event(session_id, "system", "system", "session_start", ts=0.0)
     except OSError:
         logger.debug("Failed to write session_start event", exc_info=True)
 
@@ -71,6 +68,8 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
     exit_code = 1  # Default if something goes wrong
 
     # Sanitizer for stripping ANSI from captured output
+    from mb.sanitizer import AnsiStripper
+
     output_stripper = AnsiStripper()
     input_stripper = AnsiStripper()
 
@@ -166,13 +165,12 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     sanitized = output_stripper.process(data)
                     if sanitized:
                         try:
-                            write_event(
+                            storage.write_event(
                                 session_id,
                                 "stdout",
                                 "terminal",
                                 sanitized,
                                 ts=ts,
-                                root=storage_root,
                             )
                         except OSError:
                             logger.debug("Failed to write stdout event", exc_info=True)
@@ -204,13 +202,12 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
                     sanitized = input_stripper.process(data)
                     if sanitized:
                         try:
-                            write_event(
+                            storage.write_event(
                                 session_id,
                                 "stdin",
                                 "user",
                                 sanitized,
                                 ts=ts,
-                                root=storage_root,
                             )
                         except OSError:
                             logger.debug("Failed to write stdin event", exc_info=True)
@@ -225,13 +222,12 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
         if remaining_out:
             ts = time.monotonic() - t0
             try:
-                write_event(
+                storage.write_event(
                     session_id,
                     "stdout",
                     "terminal",
                     remaining_out,
                     ts=ts,
-                    root=storage_root,
                 )
             except OSError:
                 logger.debug("Failed to write flush stdout event", exc_info=True)
@@ -239,13 +235,12 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
         if remaining_in:
             ts = time.monotonic() - t0
             try:
-                write_event(
+                storage.write_event(
                     session_id,
                     "stdin",
                     "user",
                     remaining_in,
                     ts=ts,
-                    root=storage_root,
                 )
             except OSError:
                 logger.debug("Failed to write flush stdin event", exc_info=True)
@@ -283,15 +278,14 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
         # Write system end event and finalize
         ts_end = time.monotonic() - t0
         try:
-            write_event(
+            storage.write_event(
                 session_id,
                 "system",
                 "system",
                 "session_end",
                 ts=ts_end,
-                root=storage_root,
             )
-            finalize_session(session_id, exit_code, root=storage_root)
+            storage.finalize_session(session_id, exit_code)
         except OSError:
             logger.debug("Failed to finalize session", exc_info=True)
 
@@ -299,4 +293,4 @@ def run_session(child_cmd: list[str], storage_root: Path) -> int:
         sys.stderr.write(f"[mb] Session {session_id} ended (exit code: {exit_code})\n")
         sys.stderr.flush()
 
-    return exit_code
+    return exit_code, session_id

@@ -16,6 +16,8 @@ from mb.claude_adapter import (
     is_claude_session,
     chunk_claude_session,
 )
+from mb.models import Chunk
+from mb.store import NdjsonStorage
 
 
 # --- encode_project_dir ---
@@ -328,12 +330,19 @@ def test_turn_full_text() -> None:
 
 def test_chunk_claude_session_generates_chunks(tmp_path: Path) -> None:
     """End-to-end: meta.json + Claude JSONL -> chunks.jsonl."""
+    # Set up storage root with config
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    (storage_root / "config.json").write_text('{"version": "1.0"}')
+    (storage_root / "sessions").mkdir()
+
     # Create session dir with meta.json
-    session_dir = tmp_path / "sessions" / "20260223-100000-abcd"
+    session_id = "20260223-100000-abcd"
+    session_dir = storage_root / "sessions" / session_id
     session_dir.mkdir(parents=True)
 
     meta = {
-        "session_id": "20260223-100000-abcd",
+        "session_id": session_id,
         "command": ["claude"],
         "cwd": "/tmp/test-project",
         "started_at": 1000000.0,
@@ -357,6 +366,8 @@ def test_chunk_claude_session_generates_chunks(tmp_path: Path) -> None:
         ]}},
     ])
 
+    storage = NdjsonStorage(storage_root)
+
     # Monkey-patch home dir for find_claude_session_file
     original_home = Path.home
 
@@ -365,14 +376,15 @@ def test_chunk_claude_session_generates_chunks(tmp_path: Path) -> None:
 
     try:
         Path.home = staticmethod(fake_home)
-        chunks = chunk_claude_session(session_dir)
+        chunks = chunk_claude_session(storage, session_id)
     finally:
         Path.home = original_home
 
     assert len(chunks) >= 2
-    assert chunks[0]["source"] == "claude_native"
-    assert "pytest fixtures" in chunks[0]["text"].lower()
-    assert chunks[0]["quality_score"] > 0.3
+    assert isinstance(chunks[0], Chunk)
+    assert chunks[0].to_dict()["source"] == "claude_native"
+    assert "pytest fixtures" in chunks[0].text.lower()
+    assert chunks[0].quality_score > 0.3
 
     # Verify chunks.jsonl was written
     chunks_path = session_dir / "chunks.jsonl"
@@ -414,8 +426,9 @@ def test_chunks_from_turns_has_nonzero_timestamps() -> None:
     ]
     chunks = chunks_from_turns(turns, session_id="test-sess")
     assert len(chunks) >= 1
-    assert chunks[0]["ts_start"] > 0
-    assert chunks[0]["ts_end"] > 0
+    assert isinstance(chunks[0], Chunk)
+    assert chunks[0].ts_start > 0
+    assert chunks[0].ts_end > 0
 
 
 def test_chunks_from_turns_none_timestamp_fallback() -> None:
@@ -425,8 +438,8 @@ def test_chunks_from_turns_none_timestamp_fallback() -> None:
              timestamp=None),
     ]
     chunks = chunks_from_turns(turns, session_id="test-sess")
-    assert chunks[0]["ts_start"] == 0.0
-    assert chunks[0]["ts_end"] == 0.0
+    assert chunks[0].ts_start == 0.0
+    assert chunks[0].ts_end == 0.0
 
 
 def test_chunks_from_turns_monotonic_timestamps() -> None:
@@ -438,5 +451,5 @@ def test_chunks_from_turns_monotonic_timestamps() -> None:
              timestamp="2026-02-23T11:00:00Z"),
     ]
     chunks = chunks_from_turns(turns, session_id="test-sess")
-    ts_values = [c["ts_end"] for c in chunks]
+    ts_values = [c.ts_end for c in chunks]
     assert ts_values == sorted(ts_values)
