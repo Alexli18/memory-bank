@@ -28,8 +28,9 @@ You use Claude Code normally
   Ready for search / pack
 ```
 
-Two capture modes:
+Three capture modes:
 - **Hooks** (recommended) -- installs a Claude Code Stop hook that captures sessions automatically
+- **Import** -- `mb import` retroactively imports all historical Claude Code sessions for the current project
 - **PTY wrapper** (fallback) -- `mb run -- <command>` wraps any CLI in a pseudo-terminal
 
 ## Installation
@@ -141,6 +142,24 @@ Check if the hook is installed.
 mb hooks status
 # Installed: /path/to/python -m mb.hook_handler
 ```
+
+### `mb import`
+
+Retroactively import all historical Claude Code sessions for the current project.
+
+```bash
+mb import              # Import all sessions
+mb import --dry-run    # Preview what would be imported
+```
+
+This discovers JSONL session files from `~/.claude/projects/` that match the current directory and imports them into `.memory-bank/`. Useful when you start using Memory Bank in a project that already has Claude Code history.
+
+- Automatically deduplicates -- running `mb import` again skips already-imported sessions
+- Preserves original timestamps from Claude Code sessions
+- Auto-initializes `.memory-bank/` if needed
+
+Options:
+- `--dry-run` -- show how many sessions would be imported without making changes
 
 ### `mb init`
 
@@ -285,7 +304,8 @@ After initialization, edit `.memory-bank/config.json`:
 ```
 .memory-bank/
   config.json
-  hooks_state.json           # Claude session -> mb session mapping
+  hooks_state.json           # Claude session -> mb session mapping (hooks)
+  import_state.json          # Imported Claude session UUIDs (import)
   sessions/
     20260223-194057-025c/
       meta.json              # Session metadata (source, timestamps, command)
@@ -302,9 +322,19 @@ After initialization, edit `.memory-bank/config.json`:
 ```
 
 Hook sessions have `meta.json` + `chunks.jsonl` (clean data, no events.jsonl).
+Imported sessions have `meta.json` + `chunks.jsonl` (same as hooks, `source: "import"`).
 PTY sessions have `meta.json` + `events.jsonl` + `chunks.jsonl`.
 
 ## Workflow Examples
+
+### Import existing sessions into a new project
+
+```bash
+cd ~/my-project
+mb import --dry-run    # See what's available
+mb import              # Import all historical Claude Code sessions
+mb search "auth"       # Immediately searchable
+```
 
 ### Restore context after a break
 
