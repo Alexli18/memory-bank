@@ -25,8 +25,8 @@ def test_collect_recent_excerpts_returns_chunks(tmp_path: Path) -> None:
     session_dir = root / "sessions" / "s1"
     session_dir.mkdir(parents=True)
     chunks = [
-        {"chunk_id": "s1-0", "session_id": "s1", "text": "first chunk with enough text here", "ts_start": 1.0, "ts_end": 2.0, "quality_score": 0.8},
-        {"chunk_id": "s1-1", "session_id": "s1", "text": "second chunk with enough text here", "ts_start": 3.0, "ts_end": 4.0, "quality_score": 0.8},
+        {"chunk_id": "s1-0", "session_id": "s1", "text": "The authentication module handles JWT token validation and refresh", "ts_start": 1.0, "ts_end": 2.0, "quality_score": 0.8},
+        {"chunk_id": "s1-1", "session_id": "s1", "text": "Database migration scripts run automatically on deployment startup", "ts_start": 3.0, "ts_end": 4.0, "quality_score": 0.8},
     ]
     with (session_dir / "chunks.jsonl").open("w") as f:
         for c in chunks:
@@ -53,12 +53,16 @@ def test_collect_recent_excerpts_multiple_sessions(tmp_path: Path) -> None:
     """_collect_recent_excerpts merges chunks from multiple sessions sorted by ts_end."""
     root = tmp_path / ".mb"
     storage = _make_storage(root)
+    texts = {
+        "s1": "Refactored the authentication middleware to use async request handlers",
+        "s2": "Added PostgreSQL connection pooling with configurable maximum limits",
+    }
     for sid, ts in [("s1", 1.0), ("s2", 5.0)]:
         session_dir = root / "sessions" / sid
         session_dir.mkdir(parents=True)
         chunk = {
             "chunk_id": f"{sid}-0", "session_id": sid,
-            "text": "normal data here that is long enough to pass filter",
+            "text": texts[sid],
             "ts_end": ts, "quality_score": 0.8,
         }
         (session_dir / "chunks.jsonl").write_text(json.dumps(chunk) + "\n")
@@ -135,11 +139,13 @@ def test_collect_recent_excerpts_backward_compat(tmp_path: Path) -> None:
 
 
 def _make_chunk(i: int, ts_end: float) -> dict:
-    """Helper: create a valid chunk dict."""
+    """Helper: create a valid chunk dict with unique content."""
+    import hashlib
+    h = hashlib.sha256(str(i).encode()).hexdigest()
     return {
         "chunk_id": f"s1-{i}",
         "session_id": "s1",
-        "text": f"chunk number {i} with enough text to pass filter",
+        "text": f"unique content {h} end marker",
         "ts_end": ts_end,
         "quality_score": 0.8,
     }

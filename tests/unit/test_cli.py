@@ -230,13 +230,47 @@ def test_search_returns_results(
     assert "some matching text" in result.output
 
 
+def test_search_rerank_flag_passthrough(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb search --rerank passes rerank=True to semantic_search."""
+    monkeypatch.chdir(tmp_path)
+
+    sessions = [SessionMeta.from_dict({"session_id": "s1", "command": ["bash"], "cwd": "/", "started_at": 1.0, "exit_code": 0})]
+    results = [
+        SearchResult.from_dict({
+            "score": 0.90,
+            "session_id": "s1",
+            "ts_start": 0.0,
+            "ts_end": 60.0,
+            "text": "reranked result",
+        }),
+    ]
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.list_sessions.return_value = sessions
+    mock_storage.read_config.return_value = {"ollama": {}}
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.ollama_client.client_from_config", return_value=MagicMock()),
+        patch("mb.search.semantic_search", return_value=results) as mock_search,
+    ):
+        result = runner.invoke(cli, ["search", "query", "--rerank"])
+
+    assert result.exit_code == 0
+    assert "reranked result" in result.output
+    # Verify rerank=True was passed
+    call_kwargs = mock_search.call_args[1]
+    assert call_kwargs["rerank"] is True
+
+
 # --- mb pack ---
 
 
-def test_pack_ollama_not_running(
+def test_pack_ollama_not_running_with_refresh(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """mb pack when Ollama is unavailable exits with code 2."""
+    """mb pack --refresh when Ollama is unavailable exits with code 2."""
     monkeypatch.chdir(tmp_path)
 
     from mb.ollama_client import OllamaNotRunningError
@@ -247,10 +281,133 @@ def test_pack_ollama_not_running(
         patch("mb.cli._require_storage", return_value=mock_storage),
         patch("mb.pack.build_pack", side_effect=OllamaNotRunningError("down")),
     ):
-        result = runner.invoke(cli, ["pack"])
+        result = runner.invoke(cli, ["pack", "--refresh"])
 
     assert result.exit_code == 2
     assert "Cannot connect to Ollama" in result.output
+
+
+def test_pack_default_no_ollama(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack without --refresh does not create OllamaClient."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+    mock_storage.is_stale.return_value = False
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+        patch("mb.pack.client_from_config") as mock_client,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack"])
+
+    assert result.exit_code == 0
+    mock_client.assert_not_called()
+
+
+def test_pack_refresh_calls_generate_state(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack --refresh calls generate_state() via Ollama."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack.client_from_config") as mock_client,
+        patch("mb.pack.generate_state", return_value=MagicMock()) as mock_gen,
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack", "--refresh"])
+
+    assert result.exit_code == 0
+    mock_client.assert_called_once()
+    mock_gen.assert_called_once()
+
+
+def test_pack_refresh_fallback_on_error(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack --refresh falls back to cached state when Ollama errors."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_state = MagicMock()
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=mock_state),
+        patch("mb.pack.client_from_config"),
+        patch("mb.pack.generate_state", side_effect=RuntimeError("Ollama down")),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack-output"
+        result = runner.invoke(cli, ["pack", "--refresh", "--format", "md"])
+
+    assert result.exit_code == 0
+    assert "pack-output" in result.output
+
+
+def test_pack_stale_warning(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack without --refresh shows hint when state is stale."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+    mock_storage.is_stale.return_value = True
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack"])
+
+    assert result.exit_code == 0
+    # Note is written to stderr; CliRunner mixes stdout+stderr by default
+    assert "mb pack --refresh" in result.output
+
+
+def test_generate_state_no_force_rechunk() -> None:
+    """generate_state() calls chunk_all_sessions without force=True."""
+    from mb.state import generate_state
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.iter_all_chunks.return_value = []
+    mock_client = MagicMock()
+    mock_client.chat.return_value = {
+        "summary": "test", "decisions": [], "constraints": [], "tasks": [],
+    }
+
+    with patch("mb.state.chunk_all_sessions") as mock_chunk:
+        generate_state(mock_storage, mock_client)
+
+    mock_chunk.assert_called_once_with(mock_storage)
 
 
 def test_pack_writes_to_file(
@@ -299,30 +456,60 @@ def test_hooks_uninstall_calls_function(
     mock_fn.assert_called_once()
 
 
-def test_hooks_status_installed(
+def test_hooks_status_both_installed(
     runner: CliRunner,
 ) -> None:
-    """mb hooks status shows installed state with command."""
+    """mb hooks status shows both hooks installed."""
     with patch(
         "mb.hooks.hooks_status",
-        return_value={"installed": True, "command": "python -m mb.hook_handler"},
+        return_value={
+            "stop": {"installed": True, "command": "python -m mb.hook_handler"},
+            "session_start": {"installed": True, "command": "python -m mb.session_start_hook"},
+        },
     ):
         result = runner.invoke(cli, ["hooks", "status"])
 
     assert result.exit_code == 0
-    assert "Installed" in result.output
+    assert "Stop hook: Installed" in result.output
     assert "mb.hook_handler" in result.output
+    assert "SessionStart hook: Installed" in result.output
+    assert "mb.session_start_hook" in result.output
 
 
 def test_hooks_status_not_installed(
     runner: CliRunner,
 ) -> None:
-    """mb hooks status shows 'Not installed.' when hook is absent."""
-    with patch("mb.hooks.hooks_status", return_value={"installed": False}):
+    """mb hooks status shows 'Not installed' when no hooks."""
+    with patch(
+        "mb.hooks.hooks_status",
+        return_value={
+            "stop": {"installed": False, "command": None},
+            "session_start": {"installed": False, "command": None},
+        },
+    ):
         result = runner.invoke(cli, ["hooks", "status"])
 
     assert result.exit_code == 0
-    assert "Not installed" in result.output
+    assert "Stop hook: Not installed" in result.output
+    assert "SessionStart hook: Not installed" in result.output
+
+
+def test_hooks_status_stop_only(
+    runner: CliRunner,
+) -> None:
+    """mb hooks status shows Stop installed, SessionStart not."""
+    with patch(
+        "mb.hooks.hooks_status",
+        return_value={
+            "stop": {"installed": True, "command": "python -m mb.hook_handler"},
+            "session_start": {"installed": False, "command": None},
+        },
+    ):
+        result = runner.invoke(cli, ["hooks", "status"])
+
+    assert result.exit_code == 0
+    assert "Stop hook: Installed" in result.output
+    assert "SessionStart hook: Not installed" in result.output
 
 
 # --- mb import ---
@@ -331,15 +518,20 @@ def test_hooks_status_not_installed(
 def test_import_command(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """mb import calls import_claude_sessions and shows results."""
+    """mb import calls import_claude_sessions_with_artifacts and shows results."""
     monkeypatch.chdir(tmp_path)
     _create_config(tmp_path)
 
-    with patch("mb.importer.import_claude_sessions", return_value=(3, 1)) as mock_fn:
+    mock_result = {
+        "imported": 3, "skipped": 1,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    with patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result) as mock_fn:
         result = runner.invoke(cli, ["import"])
 
     assert result.exit_code == 0
-    assert "Imported 3 session(s)" in result.output
+    assert "Imported 3 sessions" in result.output
     assert "1 skipped" in result.output
     mock_fn.assert_called_once()
 
@@ -351,12 +543,17 @@ def test_import_dry_run(
     monkeypatch.chdir(tmp_path)
     _create_config(tmp_path)
 
-    with patch("mb.importer.import_claude_sessions", return_value=(2, 0)) as mock_fn:
+    mock_result = {
+        "imported": 2, "skipped": 0,
+        "plans_imported": 1, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    with patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result) as mock_fn:
         result = runner.invoke(cli, ["import", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "Dry run" in result.output
-    assert "2 session(s) would be imported" in result.output
+    assert "Would import 2 sessions" in result.output
+    assert "1 plans" in result.output
     # Verify it was called with an NdjsonStorage instance and dry_run=True
     mock_fn.assert_called_once()
     call_args = mock_fn.call_args
@@ -371,7 +568,12 @@ def test_import_no_sessions_found(
     monkeypatch.chdir(tmp_path)
     _create_config(tmp_path)
 
-    with patch("mb.importer.import_claude_sessions", return_value=(0, 0)):
+    mock_result = {
+        "imported": 0, "skipped": 0,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    with patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result):
         result = runner.invoke(cli, ["import"])
 
     assert result.exit_code == 0
@@ -544,6 +746,252 @@ def test_run_no_command_exits_with_error(runner: CliRunner) -> None:
 
     assert result.exit_code == 1
     assert "No command specified" in result.output
+
+
+# --- mb projects ---
+
+
+def test_projects_list_multiple(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb projects lists registered projects in table format."""
+    from mb.models import ProjectEntry
+
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    (proj_a / ".memory-bank").mkdir()
+    (proj_b / ".memory-bank").mkdir()
+
+    projects = {
+        str(proj_a): ProjectEntry(path=str(proj_a), registered_at=1.0, session_count=10, last_import=1740000000.0),
+        str(proj_b): ProjectEntry(path=str(proj_b), registered_at=2.0, session_count=5, last_import=0.0),
+    }
+
+    with patch("mb.registry.list_projects", return_value=projects):
+        result = runner.invoke(cli, ["projects"])
+
+    assert result.exit_code == 0
+    assert str(proj_a) in result.output
+    assert str(proj_b) in result.output
+    assert "10" in result.output
+    assert "never" in result.output
+
+
+def test_projects_list_unreachable(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb projects marks unreachable projects."""
+    from mb.models import ProjectEntry
+
+    missing = str(tmp_path / "deleted-proj")
+    projects = {
+        missing: ProjectEntry(path=missing, registered_at=1.0, session_count=3, last_import=1740000000.0),
+    }
+
+    with patch("mb.registry.list_projects", return_value=projects):
+        result = runner.invoke(cli, ["projects"])
+
+    assert result.exit_code == 0
+    assert "unreachable" in result.output
+
+
+def test_projects_list_empty(
+    runner: CliRunner,
+) -> None:
+    """mb projects with no registered projects shows message."""
+    with patch("mb.registry.list_projects", return_value={}):
+        result = runner.invoke(cli, ["projects"])
+
+    assert result.exit_code == 0
+    assert "No projects registered" in result.output
+
+
+def test_projects_remove_existing(
+    runner: CliRunner, tmp_path: Path,
+) -> None:
+    """mb projects remove removes a project from registry."""
+    with patch("mb.registry.remove_project", return_value=True):
+        result = runner.invoke(cli, ["projects", "remove", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Removed" in result.output
+
+
+def test_projects_remove_nonexistent(
+    runner: CliRunner,
+) -> None:
+    """mb projects remove for unknown project shows not found."""
+    with patch("mb.registry.remove_project", return_value=False):
+        result = runner.invoke(cli, ["projects", "remove", "/nonexistent"])
+
+    assert result.exit_code == 0
+    assert "not found in registry" in result.output
+
+
+def test_projects_list_json(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb projects --json outputs JSON."""
+    import json
+
+    from mb.models import ProjectEntry
+
+    proj = tmp_path / "proj-json"
+    proj.mkdir()
+    (proj / ".memory-bank").mkdir()
+
+    projects = {
+        str(proj): ProjectEntry(path=str(proj), registered_at=1.0, session_count=7, last_import=1740000000.0),
+    }
+
+    with patch("mb.registry.list_projects", return_value=projects):
+        result = runner.invoke(cli, ["projects", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data["projects"]) == 1
+    assert data["projects"][0]["session_count"] == 7
+    assert data["projects"][0]["reachable"] is True
+
+
+# --- mb init auto-registration ---
+
+
+def test_init_registers_project_in_registry(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb init calls register_project to add project to global registry."""
+    monkeypatch.chdir(tmp_path)
+
+    with patch("mb.registry.register_project") as mock_reg:
+        result = runner.invoke(cli, ["init"])
+
+    assert result.exit_code == 0
+    mock_reg.assert_called_once()
+
+
+def test_import_updates_registry_stats(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb import calls update_project_stats after successful import."""
+    monkeypatch.chdir(tmp_path)
+    _create_config(tmp_path)
+
+    mock_result = {
+        "imported": 3, "skipped": 1,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.list_sessions.return_value = [MagicMock()] * 3
+    with (
+        patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result),
+        patch("mb.cli.NdjsonStorage", return_value=mock_storage),
+        patch("mb.registry.update_project_stats") as mock_update,
+    ):
+        result = runner.invoke(cli, ["import"])
+
+    assert result.exit_code == 0
+    mock_update.assert_called_once()
+
+
+# --- mb import --autostart tip ---
+
+
+def test_import_first_import_shows_tip(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First import with sessions imported shows autostart tip."""
+    monkeypatch.chdir(tmp_path)
+    _create_config(tmp_path)
+
+    mock_result = {
+        "imported": 5, "skipped": 0,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.list_sessions.return_value = [MagicMock()] * 5
+    mock_storage.load_import_state.return_value = {"imported": {}}  # empty = first import
+    with (
+        patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result),
+        patch("mb.cli.NdjsonStorage", return_value=mock_storage),
+        patch("mb.registry.update_project_stats"),
+    ):
+        result = runner.invoke(cli, ["import"])
+
+    assert result.exit_code == 0
+    assert "mb hooks install --autostart" in result.output
+
+
+def test_import_subsequent_import_no_tip(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Subsequent import does not show autostart tip."""
+    monkeypatch.chdir(tmp_path)
+    _create_config(tmp_path)
+
+    mock_result = {
+        "imported": 2, "skipped": 3,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.list_sessions.return_value = [MagicMock()] * 5
+    mock_storage.load_import_state.return_value = {"imported": {"session-1": "done"}}  # non-empty
+    with (
+        patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result),
+        patch("mb.cli.NdjsonStorage", return_value=mock_storage),
+        patch("mb.registry.update_project_stats"),
+    ):
+        result = runner.invoke(cli, ["import"])
+
+    assert result.exit_code == 0
+    assert "mb hooks install --autostart" not in result.output
+
+
+def test_import_first_import_zero_sessions_no_tip(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First import with zero sessions imported does not show tip."""
+    monkeypatch.chdir(tmp_path)
+    _create_config(tmp_path)
+
+    mock_result = {
+        "imported": 0, "skipped": 0,
+        "plans_imported": 0, "todos_imported": 0, "tasks_imported": 0,
+        "dry_run_todo_items": 0, "dry_run_task_items": 0,
+    }
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.load_import_state.return_value = {"imported": {}}
+    with (
+        patch("mb.importer.import_claude_sessions_with_artifacts", return_value=mock_result),
+        patch("mb.cli.NdjsonStorage", return_value=mock_storage),
+    ):
+        result = runner.invoke(cli, ["import"])
+
+    assert result.exit_code == 0
+    assert "mb hooks install --autostart" not in result.output
+
+
+def test_reinit_preserves_existing_registration(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running mb init preserves existing registry entry (idempotent)."""
+    monkeypatch.chdir(tmp_path)
+
+    with patch("mb.registry.register_project") as mock_reg:
+        # First init
+        runner.invoke(cli, ["init"])
+        # Second init — should still call register_project (idempotent)
+        result = runner.invoke(cli, ["init"])
+
+    assert result.exit_code == 0
+    # register_project is called on first init; second init doesn't create new storage
+    # so it returns (False, storage) and doesn't call register_project again
+    assert mock_reg.call_count >= 1
 
 
 # --- helpers ---

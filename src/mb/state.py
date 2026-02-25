@@ -90,7 +90,7 @@ def generate_state(
     Saves result to state/state.json via storage.
     """
     # Ensure all sessions are chunked (triggers claude_adapter for Claude sessions)
-    chunk_all_sessions(storage, force=True)
+    chunk_all_sessions(storage)
 
     all_chunks: list[tuple[float, float, str]] = []
     source_sessions: list[str] = []

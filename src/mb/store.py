@@ -46,6 +46,7 @@ class SessionStore(Protocol):
         cwd: str | None = None,
         source: str | None = None,
         create_events: bool = True,
+        started_at: float | None = None,
     ) -> SessionMeta: ...
 
     def finalize_session(self, session_id: str, exit_code: int | None = None) -> None: ...
@@ -104,8 +105,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _generate_session_id() -> str:
-    now = datetime.now(timezone.utc)
+def _generate_session_id(started_at: float | None = None) -> str:
+    if started_at and started_at > 0:
+        now = datetime.fromtimestamp(started_at, tz=timezone.utc)
+    else:
+        now = datetime.now(timezone.utc)
     hex_suffix = os.urandom(2).hex()
     return now.strftime("%Y%m%d-%H%M%S") + f"-{hex_suffix}"
 
@@ -167,6 +171,11 @@ class NdjsonStorage:
         )
 
         _ensure_gitignore(storage_path)
+
+        # Auto-register in global project registry
+        from mb.registry import register_project
+
+        register_project(str(storage_path.parent.resolve()))
 
         return True, NdjsonStorage(storage_path)
 
@@ -233,16 +242,18 @@ class NdjsonStorage:
         cwd: str | None = None,
         source: str | None = None,
         create_events: bool = True,
+        started_at: float | None = None,
     ) -> SessionMeta:
-        session_id = _generate_session_id()
+        session_id = _generate_session_id(started_at)
         session_dir = self.root / "sessions" / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 
+        ts = started_at if started_at and started_at > 0 else time.time()
         meta_dict: dict[str, Any] = {
             "session_id": session_id,
             "command": command,
             "cwd": cwd or str(Path.cwd()),
-            "started_at": time.time(),
+            "started_at": ts,
             "ended_at": None,
             "exit_code": None,
         }
@@ -366,15 +377,24 @@ class NdjsonStorage:
 
     def iter_all_chunks(self) -> Iterator[Chunk]:
         sessions_dir = self.root / "sessions"
-        if not sessions_dir.exists():
-            return
-        for session_dir in sorted(sessions_dir.iterdir()):
-            if not session_dir.is_dir():
-                continue
-            chunks_path = session_dir / "chunks.jsonl"
-            if not chunks_path.exists():
-                continue
-            with chunks_path.open("r", encoding="utf-8") as f:
+        if sessions_dir.exists():
+            for session_dir in sorted(sessions_dir.iterdir()):
+                if not session_dir.is_dir():
+                    continue
+                chunks_path = session_dir / "chunks.jsonl"
+                if not chunks_path.exists():
+                    continue
+                with chunks_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        yield Chunk.from_dict(json.loads(line))
+
+        # Also yield artifact chunks if they exist
+        artifact_chunks_path = self.artifacts_dir / "chunks.jsonl"
+        if artifact_chunks_path.exists():
+            with artifact_chunks_path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -418,3 +438,134 @@ class NdjsonStorage:
             if chunks_path.exists() and chunks_path.stat().st_mtime > state_mtime:
                 return True
         return False
+
+    # -- Artifact Storage ---------------------------------------------------
+
+    @property
+    def artifacts_dir(self) -> Path:
+        """Return the path to .memory-bank/artifacts/."""
+        return self.root / "artifacts"
+
+    def write_artifact_chunks(self, chunks: list[Chunk]) -> None:
+        """Append artifact chunks to artifacts/chunks.jsonl."""
+        artifacts = self.artifacts_dir
+        artifacts.mkdir(exist_ok=True)
+        chunks_path = artifacts / "chunks.jsonl"
+        with chunks_path.open("a", encoding="utf-8") as f:
+            for chunk in chunks:
+                f.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+
+    def read_artifact_chunks(self) -> list[Chunk]:
+        """Read all chunks from artifacts/chunks.jsonl."""
+        chunks_path = self.artifacts_dir / "chunks.jsonl"
+        if not chunks_path.exists():
+            return []
+        chunks: list[Chunk] = []
+        with chunks_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                chunks.append(Chunk.from_dict(json.loads(line)))
+        return chunks
+
+    def write_todo(self, session_id: str, data: dict[str, Any]) -> None:
+        """Write a todo list JSON to artifacts/todos/{session_id}.json."""
+        todos_dir = self.artifacts_dir / "todos"
+        todos_dir.mkdir(parents=True, exist_ok=True)
+        path = todos_dir / f"{session_id}.json"
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def write_plan(self, slug: str, content_md: str, meta_dict: dict[str, Any]) -> None:
+        """Write plan Markdown and metadata to artifacts/plans/."""
+        plans_dir = self.artifacts_dir / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        (plans_dir / f"{slug}.md").write_text(content_md, encoding="utf-8")
+        (plans_dir / f"{slug}.meta.json").write_text(
+            json.dumps(meta_dict, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+    def write_task(self, session_id: str, task_id: str, data: dict[str, Any]) -> None:
+        """Write a task JSON to artifacts/tasks/{session_id}/{task_id}.json."""
+        tasks_dir = self.artifacts_dir / "tasks" / session_id
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        path = tasks_dir / f"{task_id}.json"
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def load_artifact_import_state(self) -> dict[str, Any]:
+        """Load artifact sections from import_state.json."""
+        state = self.load_import_state()
+        return {
+            "artifacts": state.get("artifacts", {"todos": {}, "plans": {}, "tasks": {}}),
+            "plan_slugs": state.get("plan_slugs", []),
+        }
+
+    def count_artifacts(self) -> dict[str, Any]:
+        """Count artifacts in .memory-bank/artifacts/ directories.
+
+        Returns dict with keys: plans, todos, todo_active_items, tasks,
+        task_pending. Returns empty dict if artifacts/ doesn't exist.
+        """
+        artifacts = self.artifacts_dir
+        if not artifacts.exists():
+            return {}
+
+        plans = 0
+        todos = 0
+        todo_active_items = 0
+        tasks = 0
+        task_pending = 0
+
+        # Count plans
+        plans_dir = artifacts / "plans"
+        if plans_dir.exists():
+            plans = len(list(plans_dir.glob("*.md")))
+
+        # Count todos and active items
+        todos_dir = artifacts / "todos"
+        if todos_dir.exists():
+            for f in todos_dir.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                todos += 1
+                raw_items = data if isinstance(data, list) else data.get("items", [])
+                for item in raw_items:
+                    status = item.get("status", "pending")
+                    if status != "completed":
+                        todo_active_items += 1
+
+        # Count task sessions and pending tasks
+        tasks_dir = artifacts / "tasks"
+        if tasks_dir.exists():
+            for session_dir in tasks_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                tasks += 1
+                for tf in session_dir.glob("*.json"):
+                    try:
+                        task_data = json.loads(tf.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    status = task_data.get("status", "pending")
+                    if status in ("pending", "in_progress"):
+                        task_pending += 1
+
+        if plans == 0 and todos == 0 and tasks == 0:
+            return {}
+
+        return {
+            "plans": plans,
+            "todos": todos,
+            "todo_active_items": todo_active_items,
+            "tasks": tasks,
+            "task_pending": task_pending,
+        }
+
+    def save_artifact_import_state(self, artifact_state: dict[str, Any]) -> None:
+        """Save artifact sections back into import_state.json."""
+        state = self.load_import_state()
+        state["artifacts"] = artifact_state.get("artifacts", {"todos": {}, "plans": {}, "tasks": {}})
+        state["plan_slugs"] = artifact_state.get("plan_slugs", [])
+        self.save_import_state(state)

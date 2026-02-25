@@ -5,12 +5,29 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mb.storage import DEFAULT_CONFIG
 from mb.store import NdjsonStorage
+
+
+@pytest.fixture(autouse=True)
+def _isolate_registry(tmp_path: Path) -> Any:
+    """Prevent tests from polluting the real global registry.
+
+    Patches REGISTRY_DIR and REGISTRY_PATH in mb.registry so that
+    every test writes to a temp directory instead of ~/.memory-bank/.
+    """
+    fake_dir = tmp_path / ".memory-bank-registry"
+    fake_dir.mkdir()
+    fake_path = fake_dir / "projects.json"
+    with (
+        patch("mb.registry.REGISTRY_DIR", fake_dir),
+        patch("mb.registry.REGISTRY_PATH", fake_path),
+    ):
+        yield
 
 
 @pytest.fixture()
