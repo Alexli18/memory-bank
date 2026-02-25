@@ -274,13 +274,12 @@ class TestDebugModeRetrieverSelection:
     def test_debug_uses_contextual_retriever_when_error_found(self) -> None:
         mock_storage = MagicMock(spec=NdjsonStorage)
         mock_storage.read_config.return_value = {"version": "1.0"}
+        mock_storage.is_stale.return_value = False
 
         with (
             patch("mb.pack_modes.find_latest_error_session", return_value="err-session") as mock_find,
-            patch("mb.pack.client_from_config"),
             patch("mb.pack.chunk_all_sessions"),
             patch("mb.pack.load_state", return_value=MagicMock()),
-            patch("mb.pack._state_is_stale", return_value=False),
             patch("mb.pack._load_active_items", return_value=None),
             patch("mb.pack._load_recent_plans", return_value=None),
             patch("mb.pack.get_renderer") as mock_renderer,
@@ -296,13 +295,12 @@ class TestDebugModeRetrieverSelection:
     def test_debug_falls_back_to_recency_when_no_errors(self) -> None:
         mock_storage = MagicMock(spec=NdjsonStorage)
         mock_storage.read_config.return_value = {"version": "1.0"}
+        mock_storage.is_stale.return_value = False
 
         with (
             patch("mb.pack_modes.find_latest_error_session", return_value=None),
-            patch("mb.pack.client_from_config"),
             patch("mb.pack.chunk_all_sessions"),
             patch("mb.pack.load_state", return_value=MagicMock()),
-            patch("mb.pack._state_is_stale", return_value=False),
             patch("mb.pack._load_active_items", return_value=None),
             patch("mb.pack._load_recent_plans", return_value=None),
             patch("mb.pack.get_renderer") as mock_renderer,

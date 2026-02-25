@@ -267,10 +267,10 @@ def test_search_rerank_flag_passthrough(
 # --- mb pack ---
 
 
-def test_pack_ollama_not_running(
+def test_pack_ollama_not_running_with_refresh(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """mb pack when Ollama is unavailable exits with code 2."""
+    """mb pack --refresh when Ollama is unavailable exits with code 2."""
     monkeypatch.chdir(tmp_path)
 
     from mb.ollama_client import OllamaNotRunningError
@@ -281,10 +281,133 @@ def test_pack_ollama_not_running(
         patch("mb.cli._require_storage", return_value=mock_storage),
         patch("mb.pack.build_pack", side_effect=OllamaNotRunningError("down")),
     ):
-        result = runner.invoke(cli, ["pack"])
+        result = runner.invoke(cli, ["pack", "--refresh"])
 
     assert result.exit_code == 2
     assert "Cannot connect to Ollama" in result.output
+
+
+def test_pack_default_no_ollama(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack without --refresh does not create OllamaClient."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+    mock_storage.is_stale.return_value = False
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+        patch("mb.pack.client_from_config") as mock_client,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack"])
+
+    assert result.exit_code == 0
+    mock_client.assert_not_called()
+
+
+def test_pack_refresh_calls_generate_state(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack --refresh calls generate_state() via Ollama."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack.client_from_config") as mock_client,
+        patch("mb.pack.generate_state", return_value=MagicMock()) as mock_gen,
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack", "--refresh"])
+
+    assert result.exit_code == 0
+    mock_client.assert_called_once()
+    mock_gen.assert_called_once()
+
+
+def test_pack_refresh_fallback_on_error(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack --refresh falls back to cached state when Ollama errors."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_state = MagicMock()
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=mock_state),
+        patch("mb.pack.client_from_config"),
+        patch("mb.pack.generate_state", side_effect=RuntimeError("Ollama down")),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack-output"
+        result = runner.invoke(cli, ["pack", "--refresh", "--format", "md"])
+
+    assert result.exit_code == 0
+    assert "pack-output" in result.output
+
+
+def test_pack_stale_warning(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mb pack without --refresh shows hint when state is stale."""
+    monkeypatch.chdir(tmp_path)
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.read_config.return_value = {"ollama": {}}
+    mock_storage.is_stale.return_value = True
+
+    with (
+        patch("mb.cli._require_storage", return_value=mock_storage),
+        patch("mb.pack.chunk_all_sessions"),
+        patch("mb.pack.load_state", return_value=MagicMock()),
+        patch("mb.pack._load_active_items", return_value=None),
+        patch("mb.pack._load_recent_plans", return_value=None),
+        patch("mb.pack.get_renderer") as mock_renderer,
+    ):
+        mock_renderer.return_value.render.return_value = "pack"
+        result = runner.invoke(cli, ["pack"])
+
+    assert result.exit_code == 0
+    # Note is written to stderr; CliRunner mixes stdout+stderr by default
+    assert "mb pack --refresh" in result.output
+
+
+def test_generate_state_no_force_rechunk() -> None:
+    """generate_state() calls chunk_all_sessions without force=True."""
+    from mb.state import generate_state
+
+    mock_storage = MagicMock(spec=NdjsonStorage)
+    mock_storage.iter_all_chunks.return_value = []
+    mock_client = MagicMock()
+    mock_client.chat.return_value = {
+        "summary": "test", "decisions": [], "constraints": [], "tasks": [],
+    }
+
+    with patch("mb.state.chunk_all_sessions") as mock_chunk:
+        generate_state(mock_storage, mock_client)
+
+    mock_chunk.assert_called_once_with(mock_storage)
 
 
 def test_pack_writes_to_file(

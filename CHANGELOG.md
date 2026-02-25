@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Auto-context hook**: `mb hooks install --autostart` installs a SessionStart hook that injects a lightweight context pack into every new Claude session automatically
+- **Temporal decay**: search quality scores decay over time (half-life 14 days) so recent sessions rank higher; disable per-query with `mb search --no-decay`
+- **Cross-project search**: `mb search --global` searches across all registered projects; `mb projects` lists and manages the global registry at `~/.memory-bank/projects.json`
+- **Smart pack modes**: `mb pack --mode auto|debug|build|explore` selects budget allocation profiles tailored to different workflows; `--retriever`/`--episode` flags are deprecated
+- **Search reranking**: `mb search --rerank` uses LLM-based relevance scoring on top of vector search for better result quality
+- **JSON search output**: `mb search --json` outputs results as structured JSON (supported with `--global`)
 - **Artifact import**: `mb import` now discovers and imports Claude Code plans (`~/.claude/plans/`), todo lists (`~/.claude/todos/`), and task trees (`~/.claude/tasks/`) alongside conversation sessions
 - **Search type filter**: `mb search --type plan|todo|task|session` filters results by source type; results display `[plan]`, `[todo]`, `[task]`, `[session]` labels
 - **Artifact sections in context packs**: `mb pack` includes ACTIVE_TASKS (pending/in-progress items) and PLANS sections populated from imported artifacts, with 15% budget allocation each
@@ -28,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `mb pack` falls back to cached `state.json` when Ollama returns a server error during state generation
 - Claude adapter chunks now carry real timestamps from turn data instead of hardcoded `0.0`
 - State invalidation: `mb pack` regenerates `state.json` when new sessions appear
 - `chunk_all_sessions` now re-chunks hook-created sessions that lack `events.jsonl`

@@ -40,13 +40,14 @@ def build_pack(
     retriever: Any | None = None,
     mode: str = "auto",
     lightweight: bool = False,
+    refresh: bool = False,
 ) -> str:
     """Build a context pack within the given token budget.
 
     Steps:
-    1. Create OllamaClient from config
-    2. Generate/load ProjectState
-    3. Resolve pack mode → budget profile
+    1. Resolve pack mode → budget profile
+    2. Chunk all sessions (incremental, skips already processed)
+    3. Load/generate ProjectState (Ollama only when refresh=True)
     4. Select retriever based on mode (debug uses ContextualRetriever)
     5. Retrieve recent excerpts
     6. Render via the chosen format renderer
@@ -61,6 +62,8 @@ def build_pack(
         lightweight: If True, skip Ollama-dependent steps (chunking,
             state regeneration). Uses cached state and pre-existing
             chunks only. Suitable for SessionStart hook.
+        refresh: If True, force state regeneration via Ollama.
+            Default (False) uses cached state without Ollama calls.
 
     Returns:
         Formatted context pack string.
@@ -95,37 +98,42 @@ def build_pack(
                 half_life_days=half_life_days if enabled else 0.0,
             )
     else:
-        client = client_from_config(config)
-
         # Resolve mode to profile (auto → infer from latest session)
         pack_mode = PackMode(mode)
         if pack_mode == PackMode.AUTO:
             pack_mode = infer_mode(storage)
         profile = load_profile(config, pack_mode)
 
-        # Ensure all sessions are chunked before loading state
+        # Incremental chunking (skips already processed sessions)
         chunk_all_sessions(storage)
 
-        # Generate or load state (regenerate if stale)
         state = load_state(storage)
-        if state is None or _state_is_stale(storage):
+
+        if refresh:
+            # Explicit refresh: create Ollama client and regenerate state
+            client = client_from_config(config)
             try:
                 state = generate_state(storage, client)
             except Exception as exc:
                 sys.stderr.write(
                     f"Warning: State generation failed ({exc}), using cached state.\n"
                 )
-                if state is None:
-                    import time as _time
+        elif _state_is_stale(storage):
+            sys.stderr.write(
+                "Note: Project state is outdated. Run `mb pack --refresh` to update.\n"
+            )
 
-                    state = ProjectState(
-                        summary="",
-                        decisions=[],
-                        constraints=[],
-                        tasks=[],
-                        updated_at=_time.time(),
-                        source_sessions=[],
-                    )
+        if state is None:
+            import time as _time
+
+            state = ProjectState(
+                summary="",
+                decisions=[],
+                constraints=[],
+                tasks=[],
+                updated_at=_time.time(),
+                source_sessions=[],
+            )
 
     # Retrieve excerpts — mode determines retriever when none provided
     if retriever is None:

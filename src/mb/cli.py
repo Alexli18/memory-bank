@@ -576,6 +576,8 @@ def projects_remove(path: str) -> None:
     default="auto",
     help="Pack mode: auto (infer), debug, build, explore (default: auto).",
 )
+@click.option("--refresh", is_flag=True, default=False,
+    help="Force state regeneration via Ollama (slower, updates project summary).")
 @click.option(
     "--retriever",
     type=click.Choice(["recency", "episode"], case_sensitive=False),
@@ -596,6 +598,7 @@ def pack(
     fmt: str,
     out: str | None,
     mode: str,
+    refresh: bool,
     retriever: str,
     episode_type: str | None,
 ) -> None:
@@ -646,7 +649,7 @@ def pack(
     try:
         output = build_pack(
             budget, storage, fmt=pack_format,
-            retriever=retriever_obj, mode=mode,
+            retriever=retriever_obj, mode=mode, refresh=refresh,
         )
     except OllamaNotRunningError:
         raise OllamaUnavailableError(
