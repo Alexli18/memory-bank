@@ -121,6 +121,10 @@ def reindex(
             "ts_start": chunk.ts_start,
             "ts_end": chunk.ts_end,
         }
+        # Propagate artifact_type from chunk._extra to index metadata
+        art_type = chunk._extra.get("artifact_type")
+        if art_type is not None:
+            metadata["artifact_type"] = art_type
         index.add(vectors[0], metadata)
         total_chunks += 1
 

@@ -360,6 +360,126 @@ def _split_turn_text(text: str, max_chars: int) -> list[str]:
     return segments
 
 
+def _project_session_uuids(cwd: str) -> set[str]:
+    """Return set of session UUIDs for the given project directory.
+
+    Lists all .jsonl files (excluding agent-*) in ~/.claude/projects/{encoded_cwd}/
+    and returns their stems as a set.
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return set()
+
+    project_dir = claude_projects / encode_project_dir(cwd)
+    if not project_dir.exists():
+        return set()
+
+    return {
+        f.stem
+        for f in project_dir.iterdir()
+        if f.suffix == ".jsonl" and not f.name.startswith("agent-")
+    }
+
+
+def discover_todos(cwd: str) -> list[Path]:
+    """Find non-empty JSON todo files in ~/.claude/todos/ for this project's sessions.
+
+    Returns empty list if ~/.claude/todos/ doesn't exist.
+    """
+    todos_dir = Path.home() / ".claude" / "todos"
+    if not todos_dir.exists():
+        return []
+
+    session_uuids = _project_session_uuids(cwd)
+    if not session_uuids:
+        return []
+
+    result: list[Path] = []
+    for f in sorted(todos_dir.iterdir()):
+        if not f.suffix == ".json":
+            continue
+        # Extract session UUID from filename: {sessionUUID}-agent-{agentUUID}.json or {sessionUUID}.json
+        stem = f.stem
+        session_uuid = stem.split("-agent-")[0] if "-agent-" in stem else stem
+        if session_uuid not in session_uuids:
+            continue
+        # Skip empty files
+        if f.stat().st_size == 0:
+            continue
+        result.append(f)
+    return result
+
+
+def discover_task_dirs(cwd: str) -> list[Path]:
+    """Find task directories in ~/.claude/tasks/ for this project's sessions.
+
+    Returns empty list if ~/.claude/tasks/ doesn't exist.
+    """
+    tasks_dir = Path.home() / ".claude" / "tasks"
+    if not tasks_dir.exists():
+        return []
+
+    session_uuids = _project_session_uuids(cwd)
+    if not session_uuids:
+        return []
+
+    return [
+        d
+        for d in sorted(tasks_dir.iterdir())
+        if d.is_dir() and d.name in session_uuids
+    ]
+
+
+def discover_plan_slugs(cwd: str) -> set[str]:
+    """Scan session JSONL files for plan slug references.
+
+    Parses each line of each session JSONL in the project directory,
+    collecting unique `slug` field values.
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return set()
+
+    project_dir = claude_projects / encode_project_dir(cwd)
+    if not project_dir.exists():
+        return set()
+
+    slugs: set[str] = set()
+    for f in project_dir.iterdir():
+        if not f.suffix == ".jsonl" or f.name.startswith("agent-"):
+            continue
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                slug = data.get("slug")
+                if slug and isinstance(slug, str):
+                    slugs.add(slug)
+    return slugs
+
+
+def discover_plans(slugs: set[str]) -> list[Path]:
+    """Match plan slugs to files in ~/.claude/plans/{slug}.md.
+
+    Returns list of existing plan .md files.
+    """
+    plans_dir = Path.home() / ".claude" / "plans"
+    if not plans_dir.exists():
+        return []
+
+    result: list[Path] = []
+    for slug in sorted(slugs):
+        plan_file = plans_dir / f"{slug}.md"
+        if plan_file.exists():
+            result.append(plan_file)
+    return result
+
+
 def is_claude_session(meta: dict[str, Any]) -> bool:
     """Check if a session was a Claude Code session based on meta.json."""
     command = meta.get("command", [])

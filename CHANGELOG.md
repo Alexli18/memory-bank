@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Artifact import**: `mb import` now discovers and imports Claude Code plans (`~/.claude/plans/`), todo lists (`~/.claude/todos/`), and task trees (`~/.claude/tasks/`) alongside conversation sessions
+- **Search type filter**: `mb search --type plan|todo|task|session` filters results by source type; results display `[plan]`, `[todo]`, `[task]`, `[session]` labels
+- **Artifact sections in context packs**: `mb pack` includes ACTIVE_TASKS (pending/in-progress items) and PLANS sections populated from imported artifacts, with 15% budget allocation each
+- **Artifact summary in sessions**: `mb sessions` shows an artifact count summary line when artifacts are present
 - `mb graph` command: display session graph with episode classification, error status, and related sessions (table and `--json` output)
 - `mb pack --retriever episode --episode <type>`: episode-aware chunk retrieval for context packs
 - `mb pack --format json|md`: JSON and Markdown output formats for context packs

@@ -44,3 +44,23 @@ def import_claude_sessions(
     source = ImportSource(dry_run=dry_run)
     source.ingest(storage)
     return source.imported, source.skipped
+
+
+def import_claude_sessions_with_artifacts(
+    storage: NdjsonStorage,
+    dry_run: bool = False,
+) -> dict:
+    """Import sessions and artifacts. Returns detailed result dict."""
+    from mb.pipeline import ImportSource
+
+    source = ImportSource(dry_run=dry_run)
+    source.ingest(storage)
+    return {
+        "imported": source.imported,
+        "skipped": source.skipped,
+        "plans_imported": source.plans_imported,
+        "todos_imported": source.todos_imported,
+        "tasks_imported": source.tasks_imported,
+        "dry_run_todo_items": source.dry_run_todo_items,
+        "dry_run_task_items": source.dry_run_task_items,
+    }

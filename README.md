@@ -18,7 +18,7 @@
 ## Highlights
 
 - **Zero-friction capture** -- a Claude Code hook records every session automatically, no wrappers needed
-- **Retroactive import** -- `mb import` brings in all your historical Claude Code sessions instantly
+- **Retroactive import** -- `mb import` brings in all your historical Claude Code sessions, plans, todos, and tasks instantly
 - **Semantic search** -- find past decisions, code discussions, and debugging sessions by meaning, not keywords
 - **Context packs** -- generate a portable XML/JSON/Markdown summary and paste it into a fresh LLM session to restore full project knowledge
 - **Episode classification** -- sessions are auto-tagged by type (build, test, debug, refactor, etc.) with error detection
@@ -162,14 +162,16 @@ mb search "authentication approach"
 Expected output:
 
 ```
-[0.76] Session 20260223-194057-025c (00:00 - 00:00)
+[session] 20260223-194057-025c (00:00 - 00:00)  (score: 0.76)
   User: how should we handle auth?  Assistant: I recommend JWT with refresh tokens...
 
-[0.68] Session 20260223-184440-664c (00:00 - 00:00)
-  User: implement login endpoint  Assistant: Here's the implementation...
+[plan]    abundant-jingling-snail §2         (score: 0.68)
+  [PLAN: abundant-jingling-snail] ## Auth — JWT with refresh tokens...
 
 No more results.
 ```
+
+Results are labeled by source type: `[session]`, `[plan]`, `[todo]`, `[task]`.
 
 ### Step 4. Generate a context pack
 
@@ -195,12 +197,12 @@ mb pack --budget 6000 --out context.xml
 | `mb hooks install` | No | Install Claude Code capture hook |
 | `mb hooks uninstall` | No | Remove the capture hook |
 | `mb hooks status` | No | Check if hook is installed |
-| `mb import` | No | Import historical Claude Code sessions |
+| `mb import` | No | Import historical Claude Code sessions and artifacts |
 | `mb init` | No | Initialize `.memory-bank/` storage |
 | `mb sessions` | No | List recorded sessions |
 | `mb delete` | No | Delete a session |
 | `mb run` | No | Capture any CLI via PTY wrapper |
-| `mb search` | **Yes** | Semantic search across sessions |
+| `mb search` | **Yes** | Semantic search across sessions and artifacts |
 | `mb graph` | **Yes** | Session graph with episode classification |
 | `mb pack` | **Yes** | Generate context pack for session restore |
 
@@ -239,21 +241,28 @@ mb hooks status
 
 ### `mb import`
 
-Retroactively import all historical Claude Code sessions for the current project.
+Retroactively import all historical Claude Code sessions and artifacts for the current project.
 
 ```bash
-mb import              # Import all sessions
+mb import              # Import sessions + artifacts
 mb import --dry-run    # Preview what would be imported
 ```
 
-This discovers JSONL session files from `~/.claude/projects/` that match the current directory and imports them into `.memory-bank/`. Useful when you start using Memory Bank in a project that already has Claude Code history.
+```
+Imported 12 sessions (3 skipped)
+Imported artifacts: 2 plans, 4 todo lists, 3 task trees
+```
 
-- Automatically deduplicates -- running `mb import` again skips already-imported sessions
+This discovers JSONL session files from `~/.claude/projects/` and artifacts from `~/.claude/plans/`, `~/.claude/todos/`, `~/.claude/tasks/` that match the current project, and imports them into `.memory-bank/`. Useful when you start using Memory Bank in a project that already has Claude Code history.
+
+- Imports **sessions** (conversation transcripts) and **artifacts** (plans, todo lists, task trees)
+- Automatically deduplicates -- running `mb import` again skips already-imported items
 - Preserves original timestamps from Claude Code sessions
 - Auto-initializes `.memory-bank/` if needed
+- Artifacts are chunked and indexed alongside sessions for semantic search
 
 Options:
-- `--dry-run` -- show how many sessions would be imported without making changes
+- `--dry-run` -- show what would be imported without making changes
 
 ### `mb init`
 
@@ -275,7 +284,7 @@ Creates:
 
 ### `mb sessions`
 
-List all recorded sessions.
+List all recorded sessions. If artifacts have been imported, a summary line is shown at the end.
 
 ```bash
 mb sessions
@@ -285,6 +294,8 @@ mb sessions
 SESSION                  COMMAND     STARTED               EXIT
 20260223-194057-025c     claude      2026-02-23 19:40:57   -
 20260223-184440-664c     claude      2026-02-23 18:44:40   0
+
+Artifacts: 2 plans, 4 todo lists (7 active items), 3 task trees (12 pending tasks)
 ```
 
 ### `mb delete <session_id>`
@@ -298,15 +309,19 @@ mb delete 20260223-184440-664c
 
 ### `mb search "<query>"`
 
-Semantic search across all captured sessions.
+Semantic search across all captured sessions and artifacts.
 
 ```bash
 mb search "database schema design"
 mb search "nginx config" --top 10
+mb search "auth" --type plan       # Only search plans
 ```
+
+Results include source type labels: `[session]`, `[plan]`, `[todo]`, `[task]`.
 
 Options:
 - `--top N` -- number of results (default: 5)
+- `--type session|plan|todo|task` -- filter by source type
 
 Requires Ollama running with `nomic-embed-text` model.
 
@@ -353,11 +368,12 @@ The pack contains these sections in priority order:
 1. **PROJECT_STATE** -- LLM-generated summary of the project (never truncated)
 2. **DECISIONS** -- architectural decisions with rationale
 3. **CONSTRAINTS** -- known limitations
-4. **ACTIVE_TASKS** -- current task status
-5. **RECENT_CONTEXT_EXCERPTS** -- recent conversation excerpts
-6. **INSTRUCTIONS** -- "Paste this into a fresh LLM session"
+4. **ACTIVE_TASKS** -- pending/in-progress tasks and todos from imported artifacts (up to 15% of budget)
+5. **PLANS** -- recent plans from imported artifacts (up to 15% of budget)
+6. **RECENT_CONTEXT_EXCERPTS** -- recent conversation excerpts
+7. **INSTRUCTIONS** -- "Paste this into a fresh LLM session"
 
-When budget is exceeded, sections are removed from the bottom (excerpts first, then tasks, then decisions). PROJECT_STATE and CONSTRAINTS are never truncated.
+When budget is exceeded, lower-priority sections are truncated first. PROJECT_STATE and INSTRUCTIONS are never truncated. If no artifacts have been imported, the ACTIVE_TASKS and PLANS sections are omitted.
 
 #### Budget Guide
 
@@ -424,7 +440,7 @@ After initialization, edit `.memory-bank/config.json`:
 .memory-bank/
   config.json
   hooks_state.json           # Claude session -> mb session mapping (hooks)
-  import_state.json          # Imported Claude session UUIDs (import)
+  import_state.json          # Imported session UUIDs + artifact tracking
   sessions/
     20260223-194057-025c/
       meta.json              # Session metadata (source, timestamps, command)
@@ -433,6 +449,16 @@ After initialization, edit `.memory-bank/config.json`:
       meta.json
       events.jsonl           # Raw PTY events (only for mb run sessions)
       chunks.jsonl
+  artifacts/                 # Imported Claude Code artifacts
+    chunks.jsonl             # All artifact chunks (for search/pack)
+    plans/
+      {slug}.md              # Plan Markdown content
+      {slug}.meta.json       # Plan metadata (session, timestamp)
+    todos/
+      {session_id}.json      # Todo list items
+    tasks/
+      {session_id}/
+        {task_id}.json       # Task with dependencies
   index/
     vectors.bin              # Float32 embedding vectors
     metadata.jsonl           # Chunk metadata for search results
@@ -443,6 +469,7 @@ After initialization, edit `.memory-bank/config.json`:
 Hook sessions have `meta.json` + `chunks.jsonl` (clean data, no events.jsonl).
 Imported sessions have `meta.json` + `chunks.jsonl` (same as hooks, `source: "import"`).
 PTY sessions have `meta.json` + `events.jsonl` + `chunks.jsonl`.
+Artifacts are stored in `artifacts/` with type-specific subdirectories and a shared `chunks.jsonl` for search indexing.
 
 ## Workflow Examples
 
@@ -451,8 +478,16 @@ PTY sessions have `meta.json` + `events.jsonl` + `chunks.jsonl`.
 ```bash
 cd ~/my-project
 mb import --dry-run    # See what's available
-mb import              # Import all historical Claude Code sessions
-mb search "auth"       # Immediately searchable
+mb import              # Import sessions + artifacts (plans, todos, tasks)
+mb search "auth"       # Search across sessions and artifacts
+```
+
+### Search by artifact type
+
+```bash
+mb search "database migration" --type plan   # Only plans
+mb search "pending tasks" --type task        # Only tasks
+mb search "login flow" --type session        # Only conversations
 ```
 
 ### Restore context after a break

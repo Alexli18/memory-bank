@@ -11,6 +11,22 @@ import sys
 from dataclasses import dataclass
 
 
+# Section priority constants (lower number = higher priority, filled first)
+PRIORITY_PROJECT_STATE = 0
+PRIORITY_INSTRUCTIONS = 0
+PRIORITY_DECISIONS = 1
+PRIORITY_ACTIVE_TASKS = 2
+PRIORITY_PLANS = 3
+PRIORITY_RECENT_CONTEXT = 4
+
+# Maximum budget share per section (fraction of total budget)
+MAX_SHARE_ACTIVE_TASKS = 0.15
+MAX_SHARE_PLANS = 0.15
+
+# Protected sections that are never truncated
+PROTECTED_SECTIONS = frozenset({"PROJECT_STATE", "INSTRUCTIONS", "CONSTRAINTS"})
+
+
 def estimate_tokens(text: str) -> int:
     """Estimate token count: chars/4 with 10% safety margin (FR-013)."""
     return int(len(text) / 4 * 1.1)
@@ -24,6 +40,7 @@ class Section:
     content: str
     priority: int  # lower = higher priority (filled first)
     is_protected: bool  # never truncated if True
+    max_tokens: int = 0  # optional cap on this section's tokens (0 = no cap)
 
     @property
     def token_count(self) -> int:
@@ -60,13 +77,31 @@ def apply_budget(sections: list[Section], budget: int) -> list[Section]:
     truncated in reverse priority order (highest priority number first)
     when the total exceeds *budget*.
 
+    Per-section ``max_tokens`` caps are always enforced, even when the
+    overall total fits within *budget*.
+
     Returns a new list of Sections with possibly shortened content.
     """
-    total = sum(s.token_count for s in sections)
-    if total <= budget:
-        return list(sections)
+    # First pass: enforce per-section max_tokens caps unconditionally
+    capped: list[Section] = []
+    for s in sections:
+        if not s.is_protected and s.max_tokens > 0 and s.token_count > s.max_tokens:
+            char_limit = int(s.max_tokens * 4 / 1.1)
+            capped.append(Section(
+                name=s.name,
+                content=s.content[:char_limit],
+                priority=s.priority,
+                is_protected=s.is_protected,
+                max_tokens=s.max_tokens,
+            ))
+        else:
+            capped.append(s)
 
-    protected_cost = sum(s.token_count for s in sections if s.is_protected)
+    total = sum(s.token_count for s in capped)
+    if total <= budget:
+        return capped
+
+    protected_cost = sum(s.token_count for s in capped if s.is_protected)
     available = budget - protected_cost
 
     if available < 0:
@@ -77,7 +112,7 @@ def apply_budget(sections: list[Section], budget: int) -> list[Section]:
 
     # Non-protected sections sorted by priority (lowest number = highest priority = filled first)
     truncatable = sorted(
-        [s for s in sections if not s.is_protected],
+        [s for s in capped if not s.is_protected],
         key=lambda s: s.priority,
     )
 
@@ -87,15 +122,17 @@ def apply_budget(sections: list[Section], budget: int) -> list[Section]:
 
     for s in truncatable:
         needed = s.token_count
-        if needed <= budget_left:
+        # Apply per-section cap if set
+        effective_limit = min(budget_left, s.max_tokens) if s.max_tokens > 0 else budget_left
+        if needed <= effective_limit:
             allocated[s.name] = s.content
             budget_left -= needed
-        elif budget_left > 0:
+        elif effective_limit > 0:
             # Partially fit — keep what we can
             # Rough char limit from remaining token budget
-            char_limit = int(budget_left * 4 / 1.1)
+            char_limit = int(effective_limit * 4 / 1.1)
             allocated[s.name] = s.content[:char_limit]
-            budget_left = 0
+            budget_left -= effective_limit
             truncated = True
         else:
             allocated[s.name] = ""
@@ -107,7 +144,7 @@ def apply_budget(sections: list[Section], budget: int) -> list[Section]:
         )
 
     result: list[Section] = []
-    for s in sections:
+    for s in capped:
         if s.is_protected:
             result.append(s)
         else:
@@ -116,5 +153,6 @@ def apply_budget(sections: list[Section], budget: int) -> list[Section]:
                 content=allocated.get(s.name, ""),
                 priority=s.priority,
                 is_protected=False,
+                max_tokens=s.max_tokens,
             ))
     return result

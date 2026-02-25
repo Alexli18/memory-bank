@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+from itertools import groupby
+from operator import attrgetter
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from mb.chunker import chunk_all_sessions
-from mb.models import SearchResult
+from mb.models import GlobalSearchResult, SearchResult
 from mb.ollama_client import OllamaClient
 from mb.store import NdjsonStorage
 
@@ -44,7 +46,14 @@ class VectorIndex:
         with self.metadata_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(metadata, ensure_ascii=False) + "\n")
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[SearchResult]:
+    def search(
+        self,
+        query_vector: list[float],
+        top_k: int = 5,
+        artifact_type: str | None = None,
+        half_life_days: float = 0.0,
+        no_decay: bool = False,
+    ) -> list[SearchResult]:
         """Search for top-K similar vectors by cosine similarity.
 
         Uses memory-mapped I/O for the vectors file so that only the pages
@@ -54,6 +63,8 @@ class VectorIndex:
         Args:
             query_vector: Query embedding (will be normalized).
             top_k: Number of results to return.
+            artifact_type: If set, filter results by this artifact type.
+                Use "session" for conversation chunks (artifact_type is None in metadata).
 
         Returns:
             List of SearchResult objects.
@@ -100,16 +111,69 @@ class VectorIndex:
         # Sort by score descending
         top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
 
+        apply_boost = half_life_days > 0 and not no_decay
+
+        # For type filtering, we need to load more candidates
+        if artifact_type is not None:
+            # Load all metadata to filter by type, then pick top_k
+            all_metadata = self._load_metadata()
+            # Sort all indices by score descending
+            sorted_indices = np.argsort(scores)[::-1]
+            results: list[SearchResult] = []
+            for idx in sorted_indices:
+                if len(results) >= top_k:
+                    break
+                int_idx = int(idx)
+                if int_idx >= len(all_metadata):
+                    continue
+                meta = all_metadata[int_idx]
+                meta_type = meta.get("artifact_type")
+                # "session" filter matches chunks with no artifact_type
+                if artifact_type == "session":
+                    if meta_type is not None:
+                        continue
+                elif meta_type != artifact_type:
+                    continue
+                cosine = float(scores[idx])
+                meta["score"] = self._boosted_score(
+                    cosine, meta, half_life_days,
+                ) if apply_boost else cosine
+                results.append(SearchResult.from_dict(meta))
+
+            if apply_boost:
+                results.sort(key=lambda r: r.score, reverse=True)
+            return results
+
         # Load metadata only for the needed indices
         metadata_map = self._load_metadata_at_indices(set(top_indices))
 
-        results: list[SearchResult] = []
+        results = []
         for idx in top_indices:
             meta = metadata_map.get(int(idx), {})
-            meta["score"] = float(scores[idx])
+            cosine = float(scores[idx])
+            meta["score"] = self._boosted_score(
+                cosine, meta, half_life_days,
+            ) if apply_boost else cosine
             results.append(SearchResult.from_dict(meta))
 
+        if apply_boost:
+            results.sort(key=lambda r: r.score, reverse=True)
         return results
+
+    @staticmethod
+    def _boosted_score(
+        cosine_score: float, meta: dict[str, Any], half_life_days: float,
+    ) -> float:
+        """Apply decay tiebreaker boost to a cosine score.
+
+        Artifact chunks are not boosted (return raw cosine).
+        """
+        if meta.get("artifact_type") is not None:
+            return cosine_score
+        from mb.decay import decay_factor as _decay_factor
+
+        ts_end = meta.get("ts_end", 0.0)
+        return cosine_score * (1.0 + 0.1 * _decay_factor(ts_end, half_life_days))
 
     def _count_metadata_lines(self) -> int:
         """Count non-empty lines in metadata.jsonl without parsing JSON."""
@@ -225,13 +289,44 @@ def build_index(storage: NdjsonStorage, ollama_client: OllamaClient) -> VectorIn
             vectors = ollama_client.embed(texts)
 
             for chunk, vector in zip(batch, vectors):
-                metadata = {
+                metadata: dict[str, Any] = {
                     "chunk_id": chunk.chunk_id,
                     "session_id": chunk.session_id,
                     "text": chunk.text[:500],  # Truncate for storage
                     "ts_start": chunk.ts_start,
                     "ts_end": chunk.ts_end,
                 }
+                # Propagate artifact_type from chunk._extra to index metadata
+                art_type = chunk._extra.get("artifact_type")
+                if art_type is not None:
+                    metadata["artifact_type"] = art_type
+                index.add(vector, metadata)
+
+    # Index artifact chunks from artifacts/chunks.jsonl
+    artifact_chunks = storage.read_artifact_chunks()
+    # Group by session_id and skip already-indexed groups
+    sorted_art = sorted(artifact_chunks, key=attrgetter("session_id"))
+    for art_session_id, group in groupby(sorted_art, key=attrgetter("session_id")):
+        if art_session_id in already_indexed:
+            continue
+        art_batch = list(group)
+        batch_size = 10
+        for i in range(0, len(art_batch), batch_size):
+            batch = art_batch[i : i + batch_size]
+            texts = [c.text for c in batch]
+            vectors = ollama_client.embed(texts)
+
+            for chunk, vector in zip(batch, vectors):
+                metadata = {
+                    "chunk_id": chunk.chunk_id,
+                    "session_id": chunk.session_id,
+                    "text": chunk.text[:500],
+                    "ts_start": chunk.ts_start,
+                    "ts_end": chunk.ts_end,
+                }
+                art_type = chunk._extra.get("artifact_type")
+                if art_type is not None:
+                    metadata["artifact_type"] = art_type
                 index.add(vector, metadata)
 
     return index
@@ -242,6 +337,9 @@ def semantic_search(
     top_k: int,
     storage: NdjsonStorage,
     ollama_client: OllamaClient | None = None,
+    artifact_type: str | None = None,
+    rerank: bool = False,
+    no_decay: bool = False,
 ) -> list[SearchResult]:
     """Orchestrate semantic search: ensure index, embed query, search.
 
@@ -250,15 +348,24 @@ def semantic_search(
         top_k: Number of results to return.
         storage: NdjsonStorage instance.
         ollama_client: OllamaClient instance (created from config if None).
+        artifact_type: If set, filter results by artifact type ("session", "plan", "todo", "task").
+        rerank: If True, use LLM reranker for better relevance.
+        no_decay: If True, disable temporal decay boost.
 
     Returns:
         List of SearchResult objects.
     """
+    config = storage.read_config()
+
     if ollama_client is None:
         from mb.ollama_client import client_from_config
 
-        config = storage.read_config()
         ollama_client = client_from_config(config)
+
+    # Extract decay settings (read fresh each invocation)
+    from mb.decay import get_decay_config
+
+    half_life_days, enabled = get_decay_config(config)
 
     # Build/update index
     index = build_index(storage, ollama_client)
@@ -267,5 +374,104 @@ def semantic_search(
     query_vectors = ollama_client.embed(query)
     query_vector = query_vectors[0]
 
-    # Search
-    return index.search(query_vector, top_k=top_k)
+    # Fetch more candidates when reranking
+    fetch_k = 3 * top_k if rerank else top_k
+    results = index.search(
+        query_vector, top_k=fetch_k, artifact_type=artifact_type,
+        half_life_days=half_life_days if enabled else 0.0,
+        no_decay=no_decay,
+    )
+
+    if rerank and results:
+        from mb.reranker import rerank as rerank_fn
+
+        results = rerank_fn(query, results, ollama_client, top_k=top_k)
+
+    # Filter out low-relevance results (cosine similarity noise floor)
+    min_score = 0.35
+    results = [r for r in results if r.score >= min_score]
+
+    return results
+
+
+def global_search(
+    query: str,
+    top_k: int,
+    ollama_client: OllamaClient,
+    artifact_type: str | None = None,
+    no_decay: bool = False,
+    rerank: bool = False,
+) -> list[GlobalSearchResult]:
+    """Search across all registered projects, merging results by score.
+
+    Embeds the query once and reuses the vector across all projects.
+    Skips unavailable projects with a stderr warning.
+    """
+    import click
+
+    from mb.registry import list_projects
+
+    projects = list_projects()
+    if not projects:
+        return []
+
+    # Embed query once
+    query_vectors = ollama_client.embed(query)
+    query_vector = query_vectors[0]
+
+    all_results: list[GlobalSearchResult] = []
+
+    for project_path, _entry in projects.items():
+        mb_dir = Path(project_path) / ".memory-bank"
+        if not mb_dir.is_dir():
+            click.echo(
+                f"Warning: Skipping {project_path} (directory not found)",
+                err=True,
+            )
+            continue
+
+        try:
+            storage = NdjsonStorage.open(mb_dir)
+        except FileNotFoundError:
+            click.echo(
+                f"Warning: Skipping {project_path} (not initialized)",
+                err=True,
+            )
+            continue
+
+        try:
+            config = storage.read_config()
+        except Exception:
+            click.echo(
+                f"Warning: Skipping {project_path} (corrupt config)",
+                err=True,
+            )
+            continue
+
+        from mb.decay import get_decay_config
+
+        half_life_days, enabled = get_decay_config(config)
+
+        index = build_index(storage, ollama_client)
+        fetch_k = 3 * top_k if rerank else top_k
+        results = index.search(
+            query_vector,
+            top_k=fetch_k,
+            artifact_type=artifact_type,
+            half_life_days=half_life_days if enabled and not no_decay else 0.0,
+            no_decay=no_decay,
+        )
+
+        if rerank and results:
+            from mb.reranker import rerank as rerank_fn
+
+            results = rerank_fn(query, results, ollama_client, top_k=fetch_k)
+
+        for r in results:
+            all_results.append(
+                GlobalSearchResult.from_search_result(r, project_path)
+            )
+
+    # Merge by score, return top-K
+    all_results.sort(key=lambda r: r.score, reverse=True)
+    return all_results[:top_k]

@@ -194,6 +194,7 @@ class SearchResult:
     token_estimate: int
     quality_score: float
     score: float
+    artifact_type: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SearchResult:
@@ -207,10 +208,11 @@ class SearchResult:
             token_estimate=data.get("token_estimate", 0),
             quality_score=data.get("quality_score", 0.0),
             score=data.get("score", 0.0),
+            artifact_type=data.get("artifact_type"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "chunk_id": self.chunk_id,
             "session_id": self.session_id,
             "index": self.index,
@@ -221,6 +223,158 @@ class SearchResult:
             "quality_score": self.quality_score,
             "score": self.score,
         }
+        if self.artifact_type is not None:
+            d["artifact_type"] = self.artifact_type
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItem:
+    """A single todo item from a Claude Code todo list."""
+
+    id: str
+    content: str
+    status: str = "pending"
+    priority: str = "medium"
+    active_form: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TodoItem:
+        status = data.get("status", "pending")
+        if status not in ("pending", "in_progress", "completed"):
+            status = "pending"
+        priority = data.get("priority", "medium")
+        if priority not in ("high", "medium", "low"):
+            priority = "medium"
+        return cls(
+            id=str(data.get("id", "")),
+            content=data.get("content", ""),
+            status=status,
+            priority=priority,
+            active_form=data.get("activeForm") or data.get("active_form"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "id": self.id,
+            "content": self.content,
+            "status": self.status,
+            "priority": self.priority,
+        }
+        if self.active_form is not None:
+            d["activeForm"] = self.active_form
+        return d
+
+
+@dataclass(frozen=True, slots=True)
+class TodoList:
+    """A complete todo list file associated with a session."""
+
+    session_id: str
+    agent_id: str | None
+    items: tuple[TodoItem, ...]
+    file_path: str
+    mtime: float
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TodoList:
+        raw_items = data.get("items", ())
+        items = tuple(
+            TodoItem.from_dict(i) if isinstance(i, dict) else i
+            for i in raw_items
+        )
+        return cls(
+            session_id=data.get("session_id", ""),
+            agent_id=data.get("agent_id"),
+            items=items,
+            file_path=data.get("file_path", ""),
+            mtime=data.get("mtime", 0.0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "items": [i.to_dict() for i in self.items],
+            "file_path": self.file_path,
+            "mtime": self.mtime,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PlanMeta:
+    """Metadata for an imported plan, stored alongside the plan Markdown."""
+
+    slug: str
+    session_id: str
+    timestamp: str | None = None
+    file_path: str = ""
+    mtime: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PlanMeta:
+        return cls(
+            slug=data.get("slug", ""),
+            session_id=data.get("session_id", ""),
+            timestamp=data.get("timestamp"),
+            file_path=data.get("file_path", ""),
+            mtime=data.get("mtime", 0.0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "slug": self.slug,
+            "session_id": self.session_id,
+            "timestamp": self.timestamp,
+            "file_path": self.file_path,
+            "mtime": self.mtime,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskItem:
+    """A single task from a Claude Code task tree."""
+
+    id: str
+    session_id: str
+    subject: str = ""
+    description: str = ""
+    active_form: str | None = None
+    status: str = "pending"
+    blocks: tuple[str, ...] = ()
+    blocked_by: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskItem:
+        status = data.get("status", "pending")
+        if status not in ("pending", "in_progress", "completed", "deleted"):
+            status = "pending"
+        blocks = tuple(str(x) for x in data.get("blocks", ()))
+        blocked_by = tuple(str(x) for x in data.get("blockedBy", data.get("blocked_by", ())))
+        return cls(
+            id=str(data.get("id", "")),
+            session_id=data.get("session_id", ""),
+            subject=data.get("subject", ""),
+            description=data.get("description", ""),
+            active_form=data.get("activeForm") or data.get("active_form"),
+            status=status,
+            blocks=blocks,
+            blocked_by=blocked_by,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "id": self.id,
+            "session_id": self.session_id,
+            "subject": self.subject,
+            "description": self.description,
+            "status": self.status,
+            "blocks": list(self.blocks),
+            "blockedBy": list(self.blocked_by),
+        }
+        if self.active_form is not None:
+            d["activeForm"] = self.active_form
+        return d
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +408,82 @@ class ProjectState:
             "updated_at": self.updated_at,
             "source_sessions": self.source_sessions,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEntry:
+    """A registered Memory Bank project in the global registry."""
+
+    path: str
+    registered_at: float
+    last_import: float = 0.0
+    session_count: int = 0
+
+    @classmethod
+    def from_dict(cls, path: str, data: dict[str, Any]) -> ProjectEntry:
+        return cls(
+            path=path,
+            registered_at=data.get("registered_at", 0.0),
+            last_import=data.get("last_import", 0.0),
+            session_count=data.get("session_count", 0),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "registered_at": self.registered_at,
+            "last_import": self.last_import,
+            "session_count": self.session_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalSearchResult:
+    """A search result with cross-project attribution."""
+
+    project_path: str
+    chunk_id: str
+    session_id: str
+    index: int
+    text: str
+    ts_start: float
+    ts_end: float
+    token_estimate: int
+    quality_score: float
+    score: float
+    artifact_type: str | None = None
+
+    @classmethod
+    def from_search_result(cls, result: SearchResult, project_path: str) -> GlobalSearchResult:
+        return cls(
+            project_path=project_path,
+            chunk_id=result.chunk_id,
+            session_id=result.session_id,
+            index=result.index,
+            text=result.text,
+            ts_start=result.ts_start,
+            ts_end=result.ts_end,
+            token_estimate=result.token_estimate,
+            quality_score=result.quality_score,
+            score=result.score,
+            artifact_type=result.artifact_type,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "project_path": self.project_path,
+            "chunk_id": self.chunk_id,
+            "session_id": self.session_id,
+            "index": self.index,
+            "text": self.text,
+            "ts_start": self.ts_start,
+            "ts_end": self.ts_end,
+            "token_estimate": self.token_estimate,
+            "quality_score": self.quality_score,
+            "score": self.score,
+        }
+        if self.artifact_type is not None:
+            d["artifact_type"] = self.artifact_type
+        return d
 
 
 def _generate_event_id(session_id: str, ts: float) -> str:

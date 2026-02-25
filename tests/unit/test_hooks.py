@@ -128,13 +128,14 @@ def test_uninstall_no_file(tmp_path: Path) -> None:
 
 
 def test_status_installed(tmp_path: Path) -> None:
-    """hooks_status reports installed after install."""
+    """hooks_status reports Stop installed after install."""
     settings_path = tmp_path / "settings.json"
     install_hooks(settings_path)
 
     status = hooks_status(settings_path)
-    assert status["installed"] is True
-    assert "mb.hook_handler" in status["command"]
+    assert status["stop"]["installed"] is True
+    assert "mb.hook_handler" in status["stop"]["command"]
+    assert status["session_start"]["installed"] is False
 
 
 def test_status_not_installed(tmp_path: Path) -> None:
@@ -143,11 +144,158 @@ def test_status_not_installed(tmp_path: Path) -> None:
     settings_path.write_text("{}", encoding="utf-8")
 
     status = hooks_status(settings_path)
-    assert status["installed"] is False
+    assert status["stop"]["installed"] is False
+    assert status["session_start"]["installed"] is False
 
 
 def test_status_no_file(tmp_path: Path) -> None:
     """hooks_status reports not installed when settings.json missing."""
     settings_path = tmp_path / "settings.json"
     status = hooks_status(settings_path)
-    assert status["installed"] is False
+    assert status["stop"]["installed"] is False
+    assert status["session_start"]["installed"] is False
+
+
+# --- Dual-hook (autostart) tests ---
+
+
+def test_install_without_autostart_stop_only(tmp_path: Path) -> None:
+    """install without autostart installs only Stop hook."""
+    settings_path = tmp_path / "settings.json"
+    ok, msg = install_hooks(settings_path, autostart=False)
+
+    assert ok is True
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "Stop" in settings["hooks"]
+    assert "SessionStart" not in settings["hooks"]
+
+
+def test_install_with_autostart_both_hooks(tmp_path: Path) -> None:
+    """install with autostart installs both Stop and SessionStart hooks."""
+    settings_path = tmp_path / "settings.json"
+    ok, msg = install_hooks(settings_path, autostart=True)
+
+    assert ok is True
+    assert "Stop + SessionStart" in msg
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "Stop" in settings["hooks"]
+    assert "SessionStart" in settings["hooks"]
+    assert "mb.hook_handler" in settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert "mb.session_start_hook" in settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+def test_install_autostart_when_stop_already_present(tmp_path: Path) -> None:
+    """install autostart when Stop already present adds only SessionStart."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=False)
+    ok, msg = install_hooks(settings_path, autostart=True)
+
+    assert ok is True
+    assert "SessionStart hook installed" in msg
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert len(settings["hooks"]["Stop"]) == 1
+    assert len(settings["hooks"]["SessionStart"]) == 1
+
+
+def test_install_autostart_both_already_present(tmp_path: Path) -> None:
+    """install autostart when both already present is idempotent."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=True)
+    ok, msg = install_hooks(settings_path, autostart=True)
+
+    assert ok is False
+    assert "already installed" in msg.lower()
+
+
+# --- Dual-hook status tests (T012) ---
+
+
+def test_status_both_hooks_installed(tmp_path: Path) -> None:
+    """hooks_status shows both hooks installed after autostart install."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=True)
+
+    status = hooks_status(settings_path)
+    assert status["stop"]["installed"] is True
+    assert "mb.hook_handler" in status["stop"]["command"]
+    assert status["session_start"]["installed"] is True
+    assert "mb.session_start_hook" in status["session_start"]["command"]
+
+
+def test_status_only_stop_installed(tmp_path: Path) -> None:
+    """hooks_status shows Stop installed, SessionStart not."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=False)
+
+    status = hooks_status(settings_path)
+    assert status["stop"]["installed"] is True
+    assert status["session_start"]["installed"] is False
+
+
+def test_status_neither_installed(tmp_path: Path) -> None:
+    """hooks_status shows neither hook installed."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+
+    status = hooks_status(settings_path)
+    assert status["stop"]["installed"] is False
+    assert status["stop"]["command"] is None
+    assert status["session_start"]["installed"] is False
+    assert status["session_start"]["command"] is None
+
+
+def test_status_only_session_start_installed(tmp_path: Path) -> None:
+    """hooks_status shows SessionStart installed, Stop not (edge case)."""
+    settings_path = tmp_path / "settings.json"
+    # Manually write only SessionStart hook
+    settings = {
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "", "hooks": [{"type": "command", "command": "python -m mb.session_start_hook"}]}
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    status = hooks_status(settings_path)
+    assert status["stop"]["installed"] is False
+    assert status["session_start"]["installed"] is True
+    assert "mb.session_start_hook" in status["session_start"]["command"]
+
+
+# --- Dual-hook uninstall tests (T013) ---
+
+
+def test_uninstall_removes_both_hooks(tmp_path: Path) -> None:
+    """uninstall_hooks removes both Stop and SessionStart hooks."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=True)
+
+    ok, msg = uninstall_hooks(settings_path)
+    assert ok is True
+    assert "uninstalled" in msg.lower()
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "hooks" not in settings
+
+
+def test_uninstall_only_stop_installed(tmp_path: Path) -> None:
+    """uninstall_hooks removes Stop when only Stop present."""
+    settings_path = tmp_path / "settings.json"
+    install_hooks(settings_path, autostart=False)
+
+    ok, msg = uninstall_hooks(settings_path)
+    assert ok is True
+    assert "uninstalled" in msg.lower()
+
+
+def test_uninstall_neither_installed(tmp_path: Path) -> None:
+    """uninstall_hooks returns 'not found' when neither hook present."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{}", encoding="utf-8")
+
+    ok, msg = uninstall_hooks(settings_path)
+    assert ok is False
+    assert "not found" in msg.lower()
